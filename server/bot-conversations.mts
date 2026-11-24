@@ -40,7 +40,8 @@ export type ConversationDefaults = { runtimeMode: string; model?: unknown };
 
 export function conversationList(bot: Pick<Bot, "mainThreadId" | "conversationThreadIds">, threads: ConversationShell[]): ConversationView[] {
   const byId = new Map(threads.map((thread) => [thread.id, thread]));
-  const views = conversationIds(bot).map((id): ConversationView => {
+  const order = conversationIds(bot);
+  const views = order.map((id): ConversationView => {
     const thread = byId.get(id);
     const lastActivityAt = [thread?.latestVisibleMessage?.updatedAt, thread?.latestUserMessageAt, thread?.createdAt]
       .filter((stamp): stamp is string => typeof stamp === "string" && !!stamp).sort().at(-1) ?? null;
@@ -55,7 +56,8 @@ export function conversationList(bot: Pick<Bot, "mainThreadId" | "conversationTh
       missing: !thread,
     };
   });
-  return views.sort((a, b) => (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? ""));
+  // Ties (no messages yet) go to the conversation started last.
+  return views.sort((a, b) => (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? "") || order.indexOf(b.id) - order.indexOf(a.id));
 }
 
 /**

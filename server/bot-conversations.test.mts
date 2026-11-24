@@ -122,3 +122,8 @@ test("conversationList puts never-used conversations last", () => {
   const list = conversationList({ mainThreadId: "b", conversationThreadIds: ["a", "b"] }, [{ id: "b", createdAt: "2026-02-01T00:00:00Z" }]);
   assert.deepEqual(list.map((item) => item.id), ["b", "a"]);
 });
+
+test("conversations with the same last activity list the one started last first", () => {
+  const list = conversationList({ mainThreadId: "b", conversationThreadIds: ["a", "b", "c"] }, ["a", "b", "c"].map((id) => ({ id, createdAt: "2026-02-01T00:00:00Z" })));
+  assert.deepEqual(list.map((item) => item.id), ["c", "b", "a"]);
+});
