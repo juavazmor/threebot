@@ -1,7 +1,7 @@
 import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentPropsWithoutRef } from "react";
 import clsx from "clsx";
 import { defaultUrlTransform, type ExtraProps } from "react-markdown";
-import { ArrowDown, ArrowUp, AudioLines, ChevronLeft, Eraser, Globe, MessageCircle, Mic, Monitor, PanelRight, Square, X } from "lucide-react";
+import { ArrowDown, ArrowUp, AudioLines, ChevronLeft, Eraser, Globe, History, MessageCircle, MessageSquarePlus, Mic, Monitor, PanelRight, Square, X } from "lucide-react";
 import { Avatar } from "./Avatar";
 import { botTextColor, bubbleColors } from "../lib/character";
 import { BotMention, BotEvent } from "./BotMention";
@@ -18,6 +18,7 @@ import { parseItemLink } from "../lib/projects";
 import { ChatMessageActions } from "./ChatMessageActions";
 import { ChatAttachmentList, PendingAttachments } from "./ChatAttachments";
 import { ComposerActions, type ComposerAction } from "./ComposerActions";
+import { isConversationOf, isEarlierConversation } from "../lib/conversations";
 import { MessageImages } from "./ImageViewer";
 import { ExecutorConnectCard } from "./ExecutorConnectCard";
 import { useVoiceSettings, VoiceDock, voiceChatSupported } from "./VoiceDock";
@@ -28,7 +29,7 @@ import { startLiveDictation, type LiveDictation } from "../lib/cloudLive";
 import { isExecutorUrl } from "../lib/executor";
 import { IconButton, Spinner } from "./ui";
 import { ActivityAvatar, useReportLocalActivity } from "./ActivityAvatar";
-import { canStartFresh, openDialog, botStatus, conversationStatus, loadOlderMessages, loadThreadMeta, selectThread, sendMessage, setDetailsOpen, startSideChat, toast, useApp, useProjectsOn, watchThread } from "../store";
+import { canStartFresh, openDialog, botStatus, conversationStatus, loadOlderMessages, loadThreadMeta, selectThread, sendMessage, setDetailsOpen, startConversation, startSideChat, switchConversation, toast, useApp, useProjectsOn, watchThread } from "../store";
 import { threadKey, threadTarget } from "../lib/t3";
 import { MachineBadge } from "./MachineBadge";
 import { loadedRunFloor, runOrdinal, supplementSubagents, threadIdentity, threadLink } from "../lib/threadFamily";
@@ -265,6 +266,7 @@ export function Chat({ bot, threadId = bot.mainThreadId, onBack, embedded = fals
       )}
 
       {threadId && !embedded && <SideChatPill parentThreadId={threadId} />}
+      {!embedded && !archived && isEarlierConversation(bot, threadId) && <EarlierConversationBar bot={bot} threadId={threadId!} />}
       {voiceChat && threadId && <VoiceDock bot={identity === bot ? bot : { ...bot, ...identity }} threadId={threadId} observation={voiceObservation} onEnd={() => setVoiceChat(false)} />}
       {archived ? <div className="shrink-0 px-5 py-5 text-center text-[13px] text-muted">Archived Bot · This conversation is read-only.</div> : <Composer key={threadId ?? bot.slug} bot={bot} threadId={threadId} working={working} embedded={embedded} offline={offline} inVoiceChat={voiceChat} onVoiceChat={async () => {
         if (!threadId || !voiceChatSupported()) return;
@@ -477,6 +479,22 @@ function useMobileChat() {
   return mobile;
 }
 
+/** Above the composer of an earlier conversation (opened from a notification or a link): it can become the Bot's chat again. */
+function EarlierConversationBar({ bot, threadId }: { bot: Bot; threadId: string }) {
+  const [busy, setBusy] = useState(false);
+  const activate = () => {
+    setBusy(true);
+    void switchConversation(bot.slug, threadId).catch((error: unknown) => {
+      setBusy(false);
+      toast(`Couldn't switch: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  };
+  return <div role="status" className="mx-auto flex w-full max-w-[960px] shrink-0 items-center gap-2 px-5 pb-1 text-[12.5px] text-muted">
+    <span className="min-w-0 flex-1 truncate">An earlier conversation with {bot.name}.</span>
+    <button type="button" disabled={busy} onClick={activate} className="shrink-0 rounded-full px-2 py-1 font-medium text-fg hover:bg-hover disabled:opacity-60">{busy ? "Switching…" : "Make it active"}</button>
+  </div>;
+}
+
 function Composer({ bot, threadId, working, embedded, offline, inVoiceChat, onVoiceChat, availableBots }: { bot: Bot; threadId: string | null; working: boolean; embedded: boolean; offline: boolean; inVoiceChat: boolean; onVoiceChat: () => void; availableBots?: MentionBot[] }) {
   const draft = chatDraft(bot, threadId);
   const { text, attachments: atts, sending, failed, replyTo, fresh } = useSyncExternalStore(draft.subscribe, draft.getSnapshot, draft.getSnapshot);
@@ -505,9 +523,15 @@ function Composer({ bot, threadId, working, embedded, offline, inVoiceChat, onVo
   const freshOn = useApp((s) => !embedded && canStartFresh(threadId, s));
   const startFresh = () => { setFresh(true); ta.current?.focus({ preventScroll: true }); };
   // The screen's own lines in the composer's menu; the files belong to the shared component.
+  // In the Bot's own conversations (not a child, a side chat or a remote Bot): a new one, or an earlier one.
+  const conversationsOn = !embedded && (bot.environmentId ?? "local") === "local" && !!bot.projectId && isConversationOf(bot, threadId);
   const composerActions: ComposerAction[] = [
     ...(sideChatsOn ? [{ key: "side-chat", label: "Side chat", icon: MessageCircle, onSelect: () => void startSideChat(bot, threadId!) }] : []),
     ...(freshOn && !fresh ? [{ key: "start-fresh", label: "Start fresh", icon: Eraser, onSelect: startFresh }] : []),
+    ...(conversationsOn ? [
+      { key: "new-conversation", label: "New conversation", icon: MessageSquarePlus, onSelect: () => void startConversation(bot.slug).catch((error: unknown) => toast(`Couldn't start a conversation: ${error instanceof Error ? error.message : String(error)}`)) },
+      { key: "conversations", label: "Conversations", icon: History, onSelect: () => openDialog({ kind: "conversations", slug: bot.slug }) },
+    ] : []),
   ];
   const clearCommand = () => {
     if (!freshOn) return toast(embedded ? "Side chats can't start fresh" : "Starting fresh needs a newer T3 Code");

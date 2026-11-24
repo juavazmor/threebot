@@ -1,5 +1,5 @@
 import type { CloudTranscription, CloudTranscriptionPatch } from "./cloudSpeech";
-import type { AdoptableProject, Bot, Machine, Settings, ThreadMeta, ThreadPreview } from "./types";
+import type { AdoptableProject, Bot, Conversation, Machine, Settings, ThreadMeta, ThreadPreview } from "./types";
 
 type Session = { authenticated: boolean; passwordRequired: boolean; accessLogin: boolean };
 
@@ -91,6 +91,10 @@ export const api = {
   deleteBot: (slug: string) => req<{ ok: true; bots: Bot[] }>(`/api/bots/${slug}`, { method: "DELETE" }),
   adoptableProjects: () => req<{ projects: AdoptableProject[] }>("/api/adoptable-projects").then((r) => r.projects),
   adoptProject: (input: Partial<Bot> & { projectId: string; threadId: string | null }) => req<Bot>("/api/bots/adopt", { method: "POST", body: JSON.stringify(input) }),
+  conversations: (slug: string) => req<{ conversations: Conversation[] }>(`/api/bots/${slug}/conversations`).then((r) => r.conversations),
+  newConversation: (slug: string) => req<Bot>(`/api/bots/${slug}/conversations`, { method: "POST", body: "{}" }),
+  activateConversation: (slug: string, threadId: string) => req<Bot>(`/api/bots/${slug}/conversations/${encodeURIComponent(threadId)}/activate`, { method: "POST", body: "{}" }),
+  removeConversation: (slug: string, threadId: string) => req<Bot>(`/api/bots/${slug}/conversations/${encodeURIComponent(threadId)}`, { method: "DELETE", body: "{}" }),
   releaseBot: (slug: string) => req<{ bots: Bot[]; archive: string | null }>(`/api/bots/${slug}/release`, { method: "POST", body: "{}" }),
   threadPreviews: (stamps: Record<string, string>) => req<{ previews: Record<string, ThreadPreview> }>("/api/thread-previews", { method: "POST", body: JSON.stringify({ stamps }) }).then((r) => r.previews),
   threadMeta: (threadId: string) => req<ThreadMeta>(`/api/thread-meta?thread=${encodeURIComponent(threadId)}`),

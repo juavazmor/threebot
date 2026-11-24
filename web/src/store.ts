@@ -13,6 +13,7 @@ import { agentStatus, isProjectEnrichment } from "./lib/threadFamily";
 import { FORGET_CHANNEL, ROOM_VIEW_BYTES, clearCache, deletedRecords, forgetRecords, forgetRoom, readBoot, readRoom, readRooms, readView, stopCacheWrites, writeBoot, writeRoom, writeRooms, writeView, type CachedBoot } from "./lib/threadCache";
 import { resetAssetCopies, revokeAssetHandles } from "./lib/assetCopies";
 import { canStartSideChat, isSideChat, sideChatTitle } from "./lib/sideChats";
+import { isConversationOf } from "./lib/conversations";
 import { DRAWING_JOB_TITLE, DRAWING_OPTIONS, drawingModel, drawingsOf, drawingPending, drawingPrompt, drawingResult, drawingTitle, fixPrompt, isDrawingJob, type DrawingOption } from "./lib/avatarDrawing";
 import type { Bot, DetailsTab, Machine, ModelSelection, ProjectShell, Provider, ProviderModelPreferences, Run, RuntimeRequest, ScheduledTask, Settings, SnoozePreset, RuntimeFeatures, Subagent, ThreadMeta, ThreadPreview, ThreadShell, TurnItem } from "./lib/types";
 
@@ -32,7 +33,7 @@ export type ThreadData = {
 };
 
 export type MainBotIntent = { kind: "replace" } | { kind: "hide"; slug: string } | { kind: "delete"; slug: string };
-export type Dialog = null | "new-bot" | "settings" | "search" | "connect-apps" | { kind: "connect-apps"; url: string } | { kind: "delete-bot"; slug: string } | "adopt-project" | { kind: "rename-bot"; slug: string } | { kind: "computer"; slug: string } | { kind: "main-bot"; intent: MainBotIntent; initialSlug?: string } | { kind: "room"; id?: string } | "mobile";
+export type Dialog = null | "new-bot" | "settings" | "search" | "connect-apps" | { kind: "connect-apps"; url: string } | { kind: "delete-bot"; slug: string } | "adopt-project" | { kind: "rename-bot"; slug: string } | { kind: "computer"; slug: string } | { kind: "conversations"; slug: string } | { kind: "main-bot"; intent: MainBotIntent; initialSlug?: string } | { kind: "room"; id?: string } | "mobile";
 
 export type SearchFilter = "All" | "Messages" | "Bots" | "Rooms" | "Routines" | "Files" | "Apps";
 export type SearchSession = { query: string; filter: SearchFilter; index: number; scrollTop: number };
@@ -592,7 +593,8 @@ function notifyIfNeeded(prev: ThreadShell | undefined, next: ThreadShell) {
   if (!prev) return;
   const side = isSideChat(next);
   const ownerThreadId = side ? next.lineage.parentThreadId : next.id;
-  const bot = Object.values(get().bots).find((b) => b.mainThreadId === ownerThreadId);
+  // Any of the Bot's conversations: a routine keeps posting to the one it was made in.
+  const bot = Object.values(get().bots).find((b) => isConversationOf(b, ownerThreadId));
   if (!bot) return;
   // The request is gone: its notification is a stale reminder, even (above all) when it was answered
   // right here in the Bot this page is looking at.
@@ -619,7 +621,7 @@ function closeAnsweredNotifications() {
     // conversations waits. A completion (any other text) keeps its notice.
     const bot = Object.values(bots).find((b) => b.slug === tag);
     if (!bot || !LEGACY_WAITING.has(body)) return false;
-    return !Object.values(threads).some((thread) => waits(thread) && (thread.id === bot.mainThreadId || (isSideChat(thread) && thread.lineage.parentThreadId === bot.mainThreadId)));
+    return !Object.values(threads).some((thread) => waits(thread) && (isConversationOf(bot, thread.id) || (isSideChat(thread) && isConversationOf(bot, thread.lineage.parentThreadId))));
   });
 }
 const LEGACY_WAITING = new Set(["Waiting for you", "A side chat is waiting for you"]);
@@ -1464,6 +1466,48 @@ function mutateBots<T>(operation: () => Promise<T>): Promise<T> {
   const result = botMutations.then(operation).finally(() => { pendingBotMutations--; botsRevision++; });
   botMutations = result.catch(() => {});
   return result;
+}
+
+/** Replaces one Bot with the gateway's copy after a change that answered with it. */
+function publishBot(bot: Bot) {
+  set((s) => ({ bots: { ...s.bots, [bot.slug]: bot } }));
+}
+
+/** The Bot's active conversation changed: show it as the Bot's chat, not as a child view. */
+function openActiveConversation(bot: Bot) {
+  if (get().selected === bot.slug && bot.mainThreadId) selectThread(bot, bot.mainThreadId);
+  // The sidebar line follows the active conversation.
+  void refreshPreviews().catch(() => {});
+}
+
+/** Starts a new conversation with the Bot, in its own project, and makes it the active one. */
+export function startConversation(slug: string) {
+  return mutateBots(async () => {
+    const bot = await api.newConversation(slug);
+    publishBot(bot);
+    openActiveConversation(bot);
+    return bot;
+  });
+}
+
+/** Makes an earlier conversation the active one again: it becomes the Bot's chat, with its sidebar line. */
+export function switchConversation(slug: string, threadId: string) {
+  return mutateBots(async () => {
+    const bot = await api.activateConversation(slug, threadId);
+    publishBot(bot);
+    openActiveConversation(bot);
+    return bot;
+  });
+}
+
+/** Takes an earlier conversation off the Bot's list. Its T3 thread stays. */
+export function removeConversation(slug: string, threadId: string) {
+  return mutateBots(async () => {
+    const bot = await api.removeConversation(slug, threadId);
+    publishBot(bot);
+    if (get().selected === bot.slug && get().selectedThreadId === threadId && bot.mainThreadId) selectThread(bot, bot.mainThreadId);
+    return bot;
+  });
 }
 
 export function setMainBot(slug: string) {

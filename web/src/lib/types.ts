@@ -16,7 +16,10 @@ export type Bot = {
   primary: boolean;
   notifications: boolean;
   projectId: string | null;
+  /** The active conversation. */
   mainThreadId: string | null;
+  /** Every conversation the Bot has had, the active one included (older gateways leave it out). */
+  conversationThreadIds?: string[];
   createdAt: string;
   updatedAt?: string;
   model?: ModelSelection | null;
@@ -268,3 +271,9 @@ export type ScheduledTask = {
 
 export type SnoozePreset = { kind: "after"; minutes: number } | { kind: "at"; day: "today" | "tomorrow" | "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday"; time: string };
 export type RuntimeFeatures = { shellOlderSettled: boolean; threadFind: boolean; threadResumeCompletionMarker: boolean; sideChats: boolean; threadForceStop: boolean; voiceTranscription: boolean; freshContext: boolean; scheduledTaskThreadModes: boolean };
+
+/** One of a Bot's conversations, as `GET /api/bots/:slug/conversations` lists it (server/bot-conversations.mts). */
+export type Conversation = {
+  id: string; title: string; preview: string; createdAt: string | null; lastActivityAt: string | null;
+  active: boolean; archived: boolean; missing: boolean;
+};

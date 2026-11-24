@@ -6,6 +6,7 @@ import { ComputerOverlay } from "./components/Computer";
 import { ConnectApps } from "./components/ConnectApps";
 import { Details } from "./components/Details";
 import { DeleteBotDialog, NewBotDialog, RenameBotDialog } from "./components/NewBotDialog";
+import { ConversationsDialog } from "./components/Conversations";
 import { AdoptProjectDialog } from "./components/AdoptProjectDialog";
 import { SearchDialog } from "./components/SearchDialog";
 import { MobileDialog } from "./components/MobileDialog";
@@ -272,6 +273,7 @@ function Dialogs() {
       {dialog === "connect-apps" && <ConnectApps />}
       {typeof dialog === "object" && dialog?.kind === "connect-apps" && <ConnectApps initialUrl={dialog.url} />}
       {typeof dialog === "object" && dialog?.kind === "rename-bot" && <RenameBotDialog slug={dialog.slug} />}
+      {typeof dialog === "object" && dialog?.kind === "conversations" && <ConversationsDialog slug={dialog.slug} />}
       {typeof dialog === "object" && dialog?.kind === "room" && <RoomDialog roomId={dialog.id} />}
       {typeof dialog === "object" && dialog?.kind === "delete-bot" && (bots[dialog.slug]?.primary && Object.keys(bots).length > 1
         ? <MainBotDialog intent={{ kind: "delete", slug: dialog.slug }} />
