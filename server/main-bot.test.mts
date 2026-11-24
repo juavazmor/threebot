@@ -124,3 +124,23 @@ test('settings instruction refresh and replacement share the writer, so old prom
   assert.doesNotMatch(instructions.get('alpha')!, /You are the primary Bot/);
   assert.match(instructions.get('beta')!, /You are the primary Bot/);
 });
+
+test('conversations: an old bot.json gets its main thread as the one conversation; a new active one joins the list; update is read-modify-write', async (t) => {
+  const { registry, file, instructions } = await fixture(t, { alpha: { mainThreadId: 'thread-a' }, beta: {} });
+  assert.deepEqual((await registry.get('alpha'))!.conversationThreadIds, ['thread-a']);
+  assert.deepEqual((await registry.get('beta'))!.conversationThreadIds, [], 'no conversation before the provisioner starts one');
+  // The provisioner's first conversation.
+  assert.deepEqual((await registry.save('beta', { mainThreadId: 'thread-b' })).conversationThreadIds, ['thread-b']);
+  assert.deepEqual(JSON.parse(await readFile(file('beta'), 'utf8')).conversationThreadIds, ['thread-b']);
+  // Two new conversations at once: neither is lost.
+  await Promise.all(['thread-a2', 'thread-a3'].map((id) => registry.update('alpha', (bot) => ({ conversationThreadIds: [...bot.conversationThreadIds, id], mainThreadId: id }))));
+  const alpha = (await registry.get('alpha'))!;
+  assert.deepEqual(alpha.conversationThreadIds, ['thread-a', 'thread-a2', 'thread-a3']);
+  assert.equal(alpha.mainThreadId, 'thread-a3');
+  assert.match(instructions.get('alpha')!, /Your main conversation is T3 thread thread-a3\./);
+  // Switching back keeps the list as it is.
+  const back = await registry.update('alpha', () => ({ mainThreadId: 'thread-a' }));
+  assert.deepEqual([back.mainThreadId, back.conversationThreadIds], ['thread-a', ['thread-a', 'thread-a2', 'thread-a3']]);
+  await assert.rejects(registry.update('missing', () => ({})), { status: 404 });
+  await assert.rejects(registry.update('alpha', () => { throw Object.assign(new Error('no'), { status: 409 }); }), { status: 409 });
+});

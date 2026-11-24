@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { MAX_WAIT_MS, PENDING_MS, botThreads, busyBotThreads, createAutoUpdateStore, createAutoUpdater } from "./auto-update.mts";
+import { MAX_WAIT_MS, PENDING_MS, botThreadOwner, botThreads, busyBotThreads, createAutoUpdateStore, createAutoUpdater } from "./auto-update.mts";
 
 const file = () => path.join(mkdtempSync(path.join(tmpdir(), "tb-auto-")), "auto-update.json");
 const bots = [{ slug: "alpha", projectId: "project-alpha", mainThreadId: "thread-alpha" }];
@@ -48,6 +48,19 @@ test("usage follows adopted Bot threads and explicitly owned routine threads ins
   assert.deepEqual(botThreads(threads, bots).map((item) => item.id), ["main", "child", "routine", "routine-child"]);
   assert.deepEqual(busyBotThreads(threads, bots).map((item) => item.id), ["personal", "routine"]);
 
+});
+
+test("every conversation of an adopted Bot is its own, with its children; the user's threads are not", () => {
+  const bots = [{ slug: "repo-bot", projectId: "user-repo", mainThreadId: "main", conversationThreadIds: ["earlier", "main"], adopted: true }];
+  const threads = [
+    { id: "personal", projectId: "user-repo", status: "running" },
+    { id: "earlier", projectId: "user-repo", status: "running" },
+    { id: "earlier-child", projectId: "user-repo", status: "idle", lineage: { rootThreadId: "earlier", parentThreadId: "earlier" } },
+    { id: "main", projectId: "user-repo", status: "idle" },
+  ];
+  assert.deepEqual(botThreads(threads, bots).map((item) => item.id), ["earlier", "earlier-child", "main"]);
+  assert.equal(botThreadOwner(bots)({ id: "earlier-child", projectId: "user-repo", lineage: { rootThreadId: "earlier" } })?.slug, "repo-bot");
+  assert.equal(botThreadOwner(bots)({ id: "personal", projectId: "user-repo" }), undefined);
 });
 
 test("while a Bot is busy the update waits for the next check, and stops waiting after the cap", async () => {

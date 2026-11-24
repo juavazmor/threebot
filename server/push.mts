@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { generateVAPIDKeys, sendNotification, WebPushError } from "web-push";
-import type { Bot } from "./main-bot.mts";
+import { conversationIds, type Bot } from "./main-bot.mts";
 import type { T3Client } from "./t3rpc.mts";
 import { botIdentity } from "./bot-icons.mts";
 
@@ -382,11 +382,15 @@ export function createPushNotifier({
 
   const sideChat = (thread: ShellThread) => thread.lineage?.sideChat === true;
 
-  /** The Bot a thread notifies for. `any`: also a hidden or muted Bot, whose earlier notice still needs clearing. */
+  /**
+   * The Bot a thread notifies for: any of its conversations, not only the active one, since a routine
+   * keeps posting to the conversation it was made in. `any`: also a hidden or muted Bot, whose
+   * earlier notice still needs clearing.
+   */
   async function ownerFor(thread: ShellThread, any = false): Promise<Bot | null> {
-    const mainThreadId = sideChat(thread) ? thread.lineage?.parentThreadId : thread.id;
-    if (!mainThreadId) return null;
-    return (await bots()).find((bot) => (any || (!bot.hidden && bot.notifications !== false)) && bot.mainThreadId === mainThreadId) ?? null;
+    const conversation = sideChat(thread) ? thread.lineage?.parentThreadId : thread.id;
+    if (!conversation) return null;
+    return (await bots()).find((bot) => (any || (!bot.hidden && bot.notifications !== false)) && conversationIds(bot).includes(conversation)) ?? null;
   }
 
   // One conversation's pushes go out in order: a "resolved" must reach the push service after the
@@ -413,7 +417,8 @@ export function createPushNotifier({
       title: owner.name,
       body,
       tag: waiting ? waitingTag(owner.slug, thread.id) : owner.slug,
-      url: waiting
+      // A finished run in an earlier conversation opens that conversation, not the active one.
+      url: waiting || thread.id !== owner.mainThreadId
         ? `/?bot=${encodeURIComponent(owner.slug)}&thread=${encodeURIComponent(thread.id)}`
         : `/?bot=${encodeURIComponent(owner.slug)}`,
       bot: owner.slug,

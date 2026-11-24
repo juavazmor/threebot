@@ -102,3 +102,12 @@ test("Where coding work runs: the setting tells Bots where to start coding work,
   const nas = { environmentId: "nas", label: "truenas" };
   assert.match(codingWorkSection({ preferred: m5, fallback: nas }), /use \*\*truenas\*\* \(environmentId `nas`\) instead and start it there/);
 });
+
+test("a Bot with several conversations is told which one is in use, and to use its own when it runs in another", () => {
+  const md = renderAgentsMd({ bot: { name: "Alpha", slug: "alpha", projectId: "p", mainThreadId: "thread-now" }, settings: { userName: "Sam" }, botsRoot: "/bots" });
+  assert.match(md, /Your main conversation is T3 thread thread-now\. Sam can start new conversations with you/);
+  assert.match(md, /use that thread's id wherever these instructions give thread-now\./);
+  assert.match(md, /threadId thread-now so each run posts here/);
+  const fresh = renderAgentsMd({ bot: { name: "Alpha", slug: "alpha" }, settings: {}, botsRoot: "/bots" });
+  assert.doesNotMatch(fresh, /new conversations with you/);
+});

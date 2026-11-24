@@ -13,7 +13,7 @@ type T3Project = { id: string; workspaceRoot?: string; defaultModelSelection?: u
 /** The global settings the provisioner reads. */
 type ProvisionerSettings = { defaultModel?: unknown; autoReview?: boolean };
 
-const DEFAULT_MODEL = { instanceId: "claudeAgent", model: "claude-opus-5-5", options: [{ id: "effort", value: "medium" }] };
+export const DEFAULT_MODEL = { instanceId: "claudeAgent", model: "claude-opus-5-5", options: [{ id: "effort", value: "medium" }] };
 
 export type SeedDeps = {
   writeInstructions?: (bot: Bot, text: string) => Promise<unknown>;

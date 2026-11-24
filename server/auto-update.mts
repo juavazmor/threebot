@@ -25,6 +25,8 @@ export interface BotThread {
 export interface BotRef {
   projectId?: string | null;
   mainThreadId?: string | null;
+  /** All the Bot's conversations, the active one (mainThreadId) included. */
+  conversationThreadIds?: string[];
   adopted?: boolean;
   ownedThreadIds?: Iterable<string>;
 }
@@ -49,7 +51,7 @@ type CheckResult = { checkedAt?: string | null; error?: string | null; updateAva
  * The restart guard stays conservative even when routine ownership is unknown.
  */
 export function busyBotThreads<T extends BotThread>(threads: T[], bots: BotRef[]): T[] {
-  return botThreads(threads, bots.map(({ projectId, mainThreadId }) => ({ projectId, mainThreadId }))).filter((thread) => !thread.archivedAt
+  return botThreads(threads, bots.map(({ projectId, mainThreadId, conversationThreadIds }) => ({ projectId, mainThreadId, conversationThreadIds }))).filter((thread) => !thread.archivedAt
     && (Boolean(thread.pendingRuntimeRequest) || BUSY.has(thread.activityRunStatus ?? thread.status)));
 }
 
@@ -60,6 +62,7 @@ export function botThreadOwner<T extends BotRef>(bots: T[]) {
   for (const bot of bots) {
     if (bot.projectId && !bot.adopted) projects.set(bot.projectId, bot);
     if (bot.mainThreadId) roots.set(bot.mainThreadId, bot);
+    for (const id of bot.conversationThreadIds ?? []) roots.set(id, bot);
     for (const id of bot.ownedThreadIds ?? []) roots.set(id, bot);
   }
   return (thread: Pick<BotThread, "id" | "projectId" | "lineage">): T | undefined =>

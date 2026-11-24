@@ -116,6 +116,17 @@ test('gateway main-Bot endpoints persist replacement and reject unsafe hides/del
       assert.match(refused.body.error, /Invalid colour/);
     }
     assert.equal((await request('/api/bots/alpha')).body.color, 'violet');
+    // A bot.json from before several conversations: its main thread is its one conversation.
+    assert.deepEqual((await request('/api/bots/alpha')).body.conversationThreadIds, ['thread-alpha']);
+    // The active conversation and the list only change through /conversations, never a plain PUT.
+    const sneaky = await request('/api/bots/alpha', 'PUT', { label: 'Planner', mainThreadId: 'thread-beta', conversationThreadIds: ['thread-beta'] });
+    assert.equal(sneaky.status, 200);
+    assert.deepEqual([sneaky.body.label, sneaky.body.mainThreadId, sneaky.body.conversationThreadIds], ['Planner', 'thread-alpha', ['thread-alpha']]);
+    // Conversation routes check what they're given (T3 is unreachable here, so nothing is launched).
+    assert.equal((await request('/api/bots/alpha/conversations/thread-beta/activate', 'POST', {})).status, 404);
+    assert.equal((await request('/api/bots/alpha/conversations/thread-alpha', 'DELETE')).status, 409);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/api/bots/alpha/conversations`, { method: 'POST', body: '{}' })).status, 415);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/api/bots/alpha/conversations`, { method: 'POST', headers: { 'content-type': 'application/json', origin: 'https://evil.example' }, body: '{}' })).status, 403);
     assert.deepEqual(main((await request('/api/bots')).body.bots), ['beta']);
     const instructions = await readFile(path.join(botsRoot, 'alpha/AGENTS.md'), 'utf8');
     assert.doesNotMatch(instructions, /You are the primary Bot/);
@@ -133,6 +144,13 @@ test('gateway main-Bot endpoints persist replacement and reject unsafe hides/del
     const toolNames = listed.result.tools.map((tool: { name: string }) => tool.name);
     assert.ok(toolNames.includes('vault_list'));
     assert.ok(!toolNames.some((name: string) => name.startsWith('memory_')));
+    // An earlier conversation is still the Bot's: a routine posting there can use the Vault.
+    const alphaFile = path.join(botsRoot, 'alpha', '.bot', 'bot.json');
+    await writeFile(alphaFile, JSON.stringify({ ...JSON.parse(await readFile(alphaFile, 'utf8')), conversationThreadIds: ['thread-alpha-old', 'thread-alpha'] }));
+    const contact = (threadId: string) => mcp(alphaToken, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'vault_save_contact', arguments: { threadId, name: 'Sam' } } });
+    assert.match((await contact('thread-alpha-old')).result.content[0].text, /"saved":true/u);
+    assert.equal((await contact('thread-unknown')).result.isError, true);
+    assert.equal((await contact('thread-beta')).result.isError, true, "another Bot's conversation");
     const memoryFiles = await request('/api/memory?slug=alpha');
     assert.equal(memoryFiles.status, 200);
     assert.equal(memoryFiles.body.bot.text, '# Alpha memory\n\n- [preference] Prefers short answers.\n');

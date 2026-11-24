@@ -21,7 +21,8 @@ import { createCompressionCache, encodeBody, isCompressible, pickEncoding } from
 import { startProvisioner } from "./provisioner.mts";
 import { keepThreadsActive, settleQuietThreads } from "./auto-settle.mts";
 import { archivedBotIdentities } from "./bot-identities.mts";
-import { createMainBotRegistry, type Bot, type BotPatch } from "./main-bot.mts";
+import { createConversationRoutes } from "./bot-conversations.mts";
+import { conversationIds, createMainBotRegistry, type Bot, type BotPatch } from "./main-bot.mts";
 import {
   CLAUDE_FILE, CODEX_FILE, CONFIG_FILES, LOCAL_ENVIRONMENT, archiveAdoptedData, excludePatterns, gitRepo, mergeJsonFile, planAdoption,
   projectAgentsMd, readAdopted, registerAdopted, samePath, undoAdoptionFiles, unregisterAdopted, updateAdopted, withProjectAgents, within,
@@ -179,7 +180,7 @@ const threadMeta = createThreadMeta({ file: path.join(appDir, "thread-meta.json"
 const threadPreviews = createThreadPreviews({
   projection: async (threadId) => withTimeout((await withTimeout(t3rpc(), 10000, "T3 timed out")).call("orchestration.getThreadProjection", { threadId }), 15000, "T3 timed out"),
   nameFor: async () => {
-    const names = new Map((await listBots()).map((bot) => [bot.mainThreadId, bot.name]));
+    const names = new Map((await listBots()).flatMap((bot) => conversationIds(bot).map((id) => [id, bot.name] as const)));
     return (threadId) => names.get(threadId) ?? null;
   },
 });
@@ -358,7 +359,7 @@ const telemetry = createTelemetry({ file: path.join(appDir, "telemetry.json"), c
 async function collectUsageStats({ since, until }: { since: number; until: number }): Promise<PayloadInput> {
   const [settings, bots, auto] = await Promise.all([getSettings(), listBots(), autoUpdate.status()]);
   const projectIds = new Set<string | null | undefined>(bots.map((bot) => bot.projectId).filter(Boolean));
-  const mainThreads = new Set<string | null | undefined>(bots.map((bot) => bot.mainThreadId).filter(Boolean));
+  const mainThreads = new Set<string | null | undefined>(bots.flatMap(conversationIds));
   const quietly = <T,>(promise: Promise<T>): Promise<T | null> => promise.catch(() => null);
   const [config, tasks, threads] = await Promise.all([
     quietly(withTimeout(t3rpc(), 10000, "T3 timed out").then((client) => withTimeout(client.call("server.getConfig", {}), 15000, "T3 timed out"))),
@@ -1116,7 +1117,8 @@ async function resolveMcpAuth(raw: string): Promise<McpAuth | null> {
 const botTools = createBotTools({
   vault,
   async findBotByThread(threadId: string) {
-    return (await listBots()).find((b) => b.mainThreadId === threadId) ?? null;
+    // Any of its conversations: a routine keeps posting to the one that was active when it was made.
+    return (await listBots()).find((b) => conversationIds(b).includes(threadId)) ?? null;
   },
   listTabs: listServerTabs,
   typeIntoTab,
@@ -1147,6 +1149,18 @@ const roomRoutes = createRoomRoutes({
   freshContext: async () => (await localDescriptor().catch(() => null))?.capabilities?.freshContext === true,
   send,
   readBody,
+  requireJson,
+  checkOrigin: (req) => sameOriginRequest(req, originPolicy),
+  log: (line) => console.log(line),
+});
+
+const conversationRoutes = createConversationRoutes({
+  getBot,
+  update: (slug, change) => mainBots.update(slug, change),
+  rpc: roomRpc,
+  threads: () => shellThreads(false),
+  defaults: launchDefaults,
+  send,
   requireJson,
   checkOrigin: (req) => sameOriginRequest(req, originPolicy),
   log: (line) => console.log(line),
@@ -1537,6 +1551,7 @@ const server = http.createServer(async (req, res) => {
     if (await routineHistoryRoutes.handle(req, res, url)) return;
     if (await projectRoutes.handle(req, res, url)) return;
     if (await roomRoutes.handle(req, res, url)) return;
+    if (await conversationRoutes.handle(req, res, url)) return;
     if (p === "/api/thread-meta" && req.method === "GET") return send(res, 200, // A missing thread id is refused by threadMeta.get's own check.
       await threadMeta.get(url.searchParams.get("thread") as string), { "cache-control": "no-store" });
     if (p === "/api/thread-meta/reactions" && req.method === "POST") {
@@ -1646,6 +1661,8 @@ const server = http.createServer(async (req, res) => {
       requireJson(req);
       const patch = await readBody(req, AVATAR_BODY_LIMIT);
       if (patch && typeof patch === "object" && "codingWork" in patch) patch.codingWork = codingWorkPatch(patch.codingWork);
+      // The active conversation and the list change only through /conversations, which check them.
+      if (patch && typeof patch === "object") { delete patch.mainThreadId; delete patch.conversationThreadIds; }
       return send(res, 200, await saveBot(m[1], patch));
     }
     if (m && req.method === "DELETE") { const bots = await mainBots.remove(m[1]); return send(res, 200, { ok: true, bots }); }
@@ -1845,11 +1862,11 @@ const provisioner = startProvisioner({ t3Url: cfg.t3Url, token, listBots, saveBo
 // caught within the hour, long before it could settle.
 async function keepBotThreadsActive() {
   const bots = await listBots();
-  // A Bot made from a project shares it with the user's own threads, so only its main thread counts.
+  // A Bot made from a project shares it with the user's own threads, so only its conversations count.
   const projectIds = new Set<string | null | undefined>(bots.filter((bot) => !bot.adopted).map((bot) => bot.projectId).filter(Boolean));
   const tasks = await firstOf<{ projectId?: string | null; threadId?: string | null }[]>("scheduledTasks.subscribe", {}, (event) => Array.isArray(event.tasks) ? event.tasks : undefined).catch(() => []);
   const owned = [
-    ...bots.map((bot) => bot.mainThreadId),
+    ...bots.flatMap(conversationIds),
     ...(await rooms.list()).flatMap((room) => room.members.map((member) => member.threadId)),
     ...tasks.filter((task) => projectIds.has(task.projectId)).map((task) => task.threadId),
   ];
@@ -1866,10 +1883,10 @@ async function settleBotThreads() {
   if (!(await getSettings()).beta.settleBotThreads) return;
   const bots = await listBots();
   const settled = await settleQuietThreads({
-    threadIds: [...bots.map((bot) => bot.mainThreadId), ...(await rooms.list()).flatMap((room) => room.members.map((member) => member.threadId))],
+    threadIds: [...bots.flatMap(conversationIds), ...(await rooms.list()).flatMap((room) => room.members.map((member) => member.threadId))],
     // A Bot made from a project shares it with the user's own threads, so only its own threads count there.
     projectIds: bots.filter((bot) => !bot.adopted).map((bot) => bot.projectId),
-    rootIds: bots.map((bot) => bot.mainThreadId),
+    rootIds: bots.flatMap(conversationIds),
   }, { threads: () => shellThreads(false), dispatch: async (command) => (await t3rpc()).dispatch(command) });
   if (settled.length) console.log(`[settle] settled ${settled.length} Bot thread${settled.length === 1 ? "" : "s"} in T3`);
 }

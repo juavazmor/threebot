@@ -43,7 +43,7 @@ const PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05
 const SECRET_FILE_TTL_MS = 60 * 60 * 1000;
 const MAX_SECRET_BYTES = 16 * 1024;
 
-const threadIdProp = { type: "string", description: "Your main conversation's T3 thread id (in AGENTS.md, or mainThreadId in .bot/bot.json)." };
+const threadIdProp = { type: "string", description: "The T3 thread id of the conversation you are running in (your active one is in AGENTS.md, or mainThreadId in .bot/bot.json)." };
 
 export const TOOLS = [
   {
@@ -175,10 +175,10 @@ export function createBotTools({ vault, findBotByThread, listTabs, typeIntoTab, 
   }
 
   async function botFor(threadId: unknown, auth: McpAuth = { botSlug: null, legacy: true }): Promise<BotRef> {
-    if (typeof threadId !== "string" || !threadId) throw new Error("threadId is required: pass your main thread id from AGENTS.md.");
+    if (typeof threadId !== "string" || !threadId) throw new Error("threadId is required: pass the id of the conversation you are running in (your active one is in AGENTS.md).");
     const bot = await findBotByThread(threadId);
-    if (!bot) throw new Error("That threadId isn't a Bot's main conversation. Pass your main thread id from AGENTS.md (or mainThreadId in .bot/bot.json).");
-    if (auth.botSlug && bot.slug !== auth.botSlug) throw new Error("That threadId belongs to another Bot. Use your own main thread id from AGENTS.md.");
+    if (!bot) throw new Error("That threadId isn't one of a Bot's conversations. Pass the id of the conversation you are running in, or your active one from AGENTS.md (mainThreadId in .bot/bot.json).");
+    if (auth.botSlug && bot.slug !== auth.botSlug) throw new Error("That threadId belongs to another Bot. Use the id of your own conversation (your active one is in AGENTS.md).");
     return bot;
   }
 

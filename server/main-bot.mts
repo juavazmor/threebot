@@ -7,6 +7,11 @@ export interface Bot {
   slug: string; workspaceRoot: string; name: string; label: string; shape: string; color: string;
   section: string | null; pinned: boolean; hidden: boolean; primary: boolean; notifications: boolean;
   projectId: string | null; mainThreadId: string | null; createdAt: string; updatedAt?: string;
+  /**
+   * Every conversation (T3 thread in the Bot's project) the Bot has had, oldest first. `mainThreadId`
+   * is the active one and always in this list. Changed only through the conversation routes.
+   */
+  conversationThreadIds: string[];
   /** Made from an existing T3 project: it lives in that project's folder, with its own things in `.bot/`. */
   adopted: boolean;
   /** The machine the Bot's folder is on ("local": this one). */
@@ -26,6 +31,16 @@ const SLUG = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const DERIVED = ["slug", "workspaceRoot", "adopted", "environmentId", "dataDir"] as const;
 const withoutDerived = (value: { [key: string]: unknown }) => Object.fromEntries(Object.entries(value).filter(([key]) => !(DERIVED as readonly string[]).includes(key)));
 const failure = (message: string, status = 409) => Object.assign(new Error(message), { status });
+
+/**
+ * A Bot's conversations as stored, with the active one always in: a bot.json written before Bots
+ * had several conversations has only `mainThreadId`, which becomes its one conversation.
+ */
+export function conversationIds(bot: { mainThreadId?: unknown; conversationThreadIds?: unknown }): string[] {
+  const ids = Array.isArray(bot.conversationThreadIds) ? bot.conversationThreadIds.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
+  if (typeof bot.mainThreadId === "string" && bot.mainThreadId) ids.push(bot.mainThreadId);
+  return [...new Set(ids)];
+}
 
 // The parsed file is whatever JSON is on disk; callers check the fields they use.
 async function readJson<T>(file: string, fallback: T): Promise<any> {
@@ -72,6 +87,7 @@ export function createMainBotRegistry({ botsRoot, onBotChanged = async () => {} 
         label: "", shape: "sphere", color: "teal", section: null, pinned: false,
         hidden: false, primary: false, notifications: true, projectId: null, mainThreadId: null,
         ...meta, name: typeof meta.name === "string" && meta.name.trim() ? meta.name : slug,
+        conversationThreadIds: conversationIds(meta),
         createdAt, slug, workspaceRoot, adopted: Boolean(entry), environmentId: entry?.environmentId ?? "local",
         dataDir: entry ? path.join(workspaceRoot, ADOPTED_DATA) : workspaceRoot,
       });
@@ -127,6 +143,30 @@ export function createMainBotRegistry({ botsRoot, onBotChanged = async () => {} 
     return reconcile();
   }
 
+  async function saveNow(slug: string, makePatch: (current: Bot | undefined) => BotPatch, create: boolean) {
+    directory(slug);
+    const bots = await reconcile();
+    const current = bots.find((bot) => bot.slug === slug);
+    if (!current && !create) throw failure("Bot not found", 404);
+    const patch = makePatch(current);
+    if ("primary" in patch && typeof patch.primary !== "boolean") throw failure("primary must be a boolean", 400);
+    if ("hidden" in patch && typeof patch.hidden !== "boolean") throw failure("hidden must be a boolean", 400);
+    if (current?.primary && (patch.hidden === true || patch.primary === false)) {
+      throw failure("Choose another main Bot first.");
+    }
+    const { primary: requestedMain, ...clean } = withoutDerived(patch);
+    const next = { ...current, ...clean, slug, primary: current?.primary ?? false, updatedAt: new Date().toISOString() };
+    // A new active conversation (the provisioner's first one, a new one) joins the list.
+    next.conversationThreadIds = conversationIds(next);
+    if (requestedMain === true) next.hidden = false;
+    await persistMetadata(next);
+    const updated = requestedMain === true ? await choose(slug) : await reconcile();
+    // Just written, so the reload has it.
+    const saved = updated.find((bot) => bot.slug === slug)!;
+    await onBotChanged(saved);
+    return saved;
+  }
+
   return {
     list: () => exclusive(reconcile),
     refreshInstructions: () => exclusive(async () => {
@@ -137,26 +177,15 @@ export function createMainBotRegistry({ botsRoot, onBotChanged = async () => {} 
       return (await reconcile()).find((bot) => bot.slug === slug) ?? null;
     }),
     select: (slug: string) => exclusive(() => choose(slug)),
-    save: (slug: string, patch: BotPatch, { create = false }: { create?: boolean } = {}) => exclusive(async () => {
-      directory(slug);
-      const bots = await reconcile();
-      const current = bots.find((bot) => bot.slug === slug);
-      if (!current && !create) throw failure("Bot not found", 404);
-      if ("primary" in patch && typeof patch.primary !== "boolean") throw failure("primary must be a boolean", 400);
-      if ("hidden" in patch && typeof patch.hidden !== "boolean") throw failure("hidden must be a boolean", 400);
-      if (current?.primary && (patch.hidden === true || patch.primary === false)) {
-        throw failure("Choose another main Bot first.");
-      }
-      const { primary: requestedMain, ...clean } = withoutDerived(patch);
-      const next = { ...current, ...clean, slug, primary: current?.primary ?? false, updatedAt: new Date().toISOString() };
-      if (requestedMain === true) next.hidden = false;
-      await persistMetadata(next);
-      const updated = requestedMain === true ? await choose(slug) : await reconcile();
-      // Just written, so the reload has it.
-      const saved = updated.find((bot) => bot.slug === slug)!;
-      await onBotChanged(saved);
-      return saved;
-    }),
+    save: (slug: string, patch: BotPatch, { create = false }: { create?: boolean } = {}) => exclusive(() => saveNow(slug, () => patch, create)),
+    /**
+     * Saves what `change` makes of the Bot as it is on disk, with no other write in between: for
+     * read-modify-write changes such as the conversation list. `change` may throw an HTTP error.
+     */
+    update: (slug: string, change: (bot: Bot) => BotPatch) => exclusive(() => saveNow(slug, (current) => {
+      if (!current) throw failure("Bot not found", 404);
+      return change(current);
+    }, false)),
     remove: (slug: string) => exclusive(async () => {
       directory(slug);
       const bots = await reconcile();

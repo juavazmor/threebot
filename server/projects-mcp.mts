@@ -11,12 +11,12 @@ export type ProjectTool = {
   annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
 };
 export type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
-/** The Bot whose main thread is `threadId`; throws when it isn't one. */
+/** The Bot one of whose conversations is `threadId`; throws when it isn't one. */
 export type BotFor = (threadId: unknown) => Promise<{ name?: string; slug?: string }>;
 /** A tool call's arguments: the Bot's MCP JSON. Each tool checks what it uses. */
 type ToolArgs = Record<string, unknown>;
 
-const threadIdProp = { type: "string", description: "Your main conversation's T3 thread id (in AGENTS.md, or mainThreadId in .bot/bot.json). Changes are shown as made by you." };
+const threadIdProp = { type: "string", description: "The T3 thread id of the conversation you are running in (your active one is in AGENTS.md, or mainThreadId in .bot/bot.json). Changes are shown as made by you." };
 const statusHelp = Object.entries(STATUSES).filter(([, list]) => list.length).map(([kind, list]) => `${kind}: ${list.join("|")}`).join("; ");
 
 const linkSchema = {

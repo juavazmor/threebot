@@ -296,12 +296,12 @@ test("pushes are signed with a contact Apple accepts", async () => {
 });
 
 /** A notifier fed by hand, with one Bot whose main conversation is thread "main". */
-async function notifierWith(preview?: (threadId: string, stamp: string | null) => Promise<PushPreview | null>) {
+async function notifierWith(preview?: (threadId: string, stamp: string | null) => Promise<PushPreview | null>, botExtra: Record<string, unknown> = {}) {
   let handler: (event: any) => void = () => {};
   const sent: any[] = [];
   const notifier = createPushNotifier({
     connect: async () => ({ stream: (_tag: string, _payload: unknown, onItem: (event: any) => void) => { handler = onItem; return { done: new Promise<void>(() => {}), cancel() {} }; } }) as any,
-    bots: async () => [{ slug: "alpha", name: "Alpha", projectId: "project", mainThreadId: "main", notifications: true, hidden: false } as any],
+    bots: async () => [{ slug: "alpha", name: "Alpha", projectId: "project", mainThreadId: "main", notifications: true, hidden: false, ...botExtra } as any],
     send: async (item) => { sent.push(item); },
     preview,
     retryMs: 60_000,
@@ -321,7 +321,7 @@ async function notifierWith(preview?: (threadId: string, stamp: string | null) =
     await settle();
     return sent.map((item) => item.body);
   };
-  return { notifier, finish };
+  return { notifier, finish, sent };
 }
 
 test("only the main conversation and a waiting side chat push, as on the page", async () => {
@@ -339,6 +339,20 @@ test("only the main conversation and a waiting side chat push, as on the page", 
   // Snoozed until later: quiet. A snooze that has passed: back to normal.
   assert.deepEqual(await finish("main", "completed", { snoozedUntil: "2026-11-10T12:00:00.000Z" }), []);
   assert.deepEqual(await finish("main", "completed", { snoozedUntil: "2026-11-10T09:00:00.000Z" }), ["Finished"]);
+  notifier.stop();
+});
+
+test("an earlier conversation still pushes, and its link opens that conversation", async () => {
+  const { notifier, finish, sent } = await notifierWith(undefined, { conversationThreadIds: ["earlier", "main"] });
+  // A routine made in the earlier conversation keeps posting there after the user switched.
+  assert.deepEqual(await finish("earlier", "completed"), ["Finished"]);
+  assert.equal(sent[0].url, "/?bot=alpha&thread=earlier");
+  assert.deepEqual(await finish("main", "completed"), ["Finished"]);
+  assert.equal(sent[0].url, "/?bot=alpha");
+  const sideOfEarlier = { lineage: { rootThreadId: "earlier", parentThreadId: "earlier", sideChat: true }, pendingRuntimeRequest: { id: "r" } };
+  assert.deepEqual(await finish("side", "waiting", sideOfEarlier), ["A side chat is waiting for you"]);
+  // A thread the Bot never started (the user's own, in an adopted project) stays quiet.
+  assert.deepEqual(await finish("users-own", "completed"), []);
   notifier.stop();
 });
 

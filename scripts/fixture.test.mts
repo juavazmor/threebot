@@ -962,6 +962,23 @@ test('a T3 project in a git repo becomes a Bot in place, keeps git status clean,
     assert.equal((await fixture.request('/api/bots/adopt', 'POST', { projectId: 'project-app', name: 'Again' })).status, 409);
     assert.equal((await fixture.request('/api/bots/app-keeper', 'DELETE')).status, 409, 'deleting never trashes the project');
 
+    // More conversations: only the ones the Bot started are its own, never the user's threads in that project.
+    const ids = async () => (await fixture.request('/api/bots/app-keeper/conversations')).body.conversations.map((c: Json) => [c.id, c.active]);
+    assert.deepEqual(await ids(), [['thread-app-1', true]]);
+    const another = await fixture.request('/api/bots/app-keeper/conversations', 'POST', {});
+    assert.equal(another.status, 200, JSON.stringify(another.body));
+    const newest = another.body.mainThreadId;
+    assert.ok(newest && !['thread-app-1', 'thread-app-2'].includes(newest), 'a new thread in the project');
+    assert.deepEqual(another.body.conversationThreadIds, ['thread-app-1', newest]);
+    assert.deepEqual((await ids()).map(([id]: [string]) => id).sort(), ['thread-app-1', newest].sort());
+    assert.match(await read('CLAUDE.local.md'), new RegExp(`Your main conversation is T3 thread ${newest}`), 'the instructions follow the active conversation');
+    assert.equal((await fixture.request('/api/bots/app-keeper/conversations/thread-app-2/activate', 'POST', {})).status, 404, "the user's own thread");
+    const back = await fixture.request('/api/bots/app-keeper/conversations/thread-app-1/activate', 'POST', {});
+    assert.equal(back.status, 200, JSON.stringify(back.body));
+    assert.equal(back.body.mainThreadId, 'thread-app-1');
+    assert.match(await read('CLAUDE.local.md'), /Your main conversation is T3 thread thread-app-1/);
+    assert.equal(status(), '', 'git status stays clean');
+
     // Turn back into a plain project.
     const released = await fixture.request('/api/bots/app-keeper/release', 'POST', {});
     assert.equal(released.status, 200, JSON.stringify(released.body));
