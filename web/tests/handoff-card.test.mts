@@ -117,7 +117,9 @@ test("a proposal id is read only from a proposal the gateway made", () => {
   assert.equal(handoffProposalId(JSON.stringify({ proposalId: ID })), null);
   assert.equal(handoffProposalId(JSON.stringify({ proposed: true, proposalId: "../../vault" })), null);
   assert.equal(handoffProposalId(JSON.stringify({ proposed: true, proposalId: `${ID}x` })), null);
-  assert.equal(handoffRunsAs(stored().launchSettings), "Plan mode: it reads files and the web without asking, and asks before it changes anything");
+  assert.equal(handoffRunsAs(stored().launchSettings), "Plan mode: it reads the approved copy of the project and the web without asking, and it can send what it reads to the web; it asks before editing files or running other threads");
+  // It never promises to ask before every change: reading and sending to the web happen unasked.
+  assert.doesNotMatch(handoffRunsAs(stored().launchSettings), /asks before it changes anything/);
 });
 
 test("the card shows the stored proposal and the exact message, and Approve launches it", async () => {
@@ -127,8 +129,8 @@ test("the card shows the stored proposal and the exact message, and Approve laun
   assert.match(host.textContent, /Reader proposes a new thread: Evaluate fit/);
   assert.match(host.textContent, /App/);
   assert.match(host.textContent, /\/work\/app/);
-  assert.match(host.textContent, /Plan mode: it reads files and the web without asking, and asks before it changes anything/);
-  assert.doesNotMatch(host.textContent, /asks before any change/);
+  assert.match(host.textContent, /Plan mode: it reads the approved copy of the project and the web without asking, and it can send what it reads to the web; it asks before editing files or running other threads/);
+  assert.doesNotMatch(host.textContent, /asks before (any change|it changes anything)/);
   assert.match(host.textContent, /The isolated evaluator folder \/home\/user\/\.threebot\/evaluator, reading the project at \/work\/app/);
   // The whole message, not a clipped scroll box.
   const pre = host.querySelector("pre");

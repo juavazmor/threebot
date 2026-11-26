@@ -71,7 +71,7 @@ export function handoffStatusLabel(status: HandoffStatus): string {
  * combination is described by what it does; anything else is named as T3 names it.
  */
 export function handoffRunsAs(settings: HandoffProposal["launchSettings"]): string {
-  if (settings.interactionMode === "plan" && settings.runtimeMode === "approval-required") return "Plan mode: it reads files and the web without asking, and asks before it changes anything";
+  if (settings.interactionMode === "plan" && settings.runtimeMode === "approval-required") return "Plan mode: it reads the approved copy of the project and the web without asking, and it can send what it reads to the web; it asks before editing files or running other threads";
   return `${settings.interactionMode} mode, ${settings.runtimeMode}`;
 }
 
