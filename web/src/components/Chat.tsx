@@ -348,7 +348,7 @@ function EntryView({ entry, prev, bot, threadId, onOpenFile, onReply, accent, on
     case "secret":
       return <SecretCard entry={entry} threadId={threadId} />;
     case "handoff":
-      return <HandoffCard entry={entry} bot={bot} />;
+      return <HandoffCard entry={entry} bot={bot} threadId={threadId} />;
     case "subagent":
       return <SubagentCard entry={entry} bot={bot} threadId={threadId} />;
     case "plan":

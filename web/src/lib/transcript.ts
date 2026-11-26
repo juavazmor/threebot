@@ -4,7 +4,7 @@ import type { Bot, ModelSelection, Run, RuntimeRequest, ScheduledTask, TurnItem 
 import { botDelivery, shortToolName } from "./botMessages";
 import { questionAnswerMessageId } from "./runtimeRequests";
 import { parseReply } from "./reply";
-import { handoffProposalId } from "./handoffs";
+import { HANDOFF_TOOL_NAMES, handoffProposalId } from "./handoffs";
 
 // Turns T3 turn items into chat entries: bubbles, cards and
 // a few centered event lines. Raw tool activity stays hidden.
@@ -260,10 +260,10 @@ export function buildEntries(items: TurnItem[], ctx: Ctx): Entry[] {
         const name = shortTool(toolName(i));
         const input = parseInput(i);
         if (i.status === "failed") break;
-        if (name === "handoff_propose") {
+        if (HANDOFF_TOOL_NAMES.includes(toolName(i))) {
           // The card is the gateway's stored proposal; the call only says which one. A repeated
           // proposal returns the same id, so its card moves down instead of showing twice.
-          const proposalId = i.status === "completed" ? handoffProposalId(outputText(i)) : null;
+          const proposalId = i.status === "completed" ? handoffProposalId(i.output) : null;
           if (!proposalId) break;
           const earlier = out.findIndex((entry) => entry.kind === "handoff" && entry.proposalId === proposalId);
           if (earlier >= 0) out.splice(earlier, 1);

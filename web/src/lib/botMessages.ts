@@ -11,7 +11,8 @@ function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? Object.fromEntries(Object.entries(value)) : null;
 }
 
-function resultObject(value: unknown): Record<string, unknown> | null {
+/** A tool's result as an object, or null when the tool failed or answered with an error. */
+export function resultObject(value: unknown): Record<string, unknown> | null {
   const result = object(value);
   if (!result || result.isError === true || result.error || result._tag === "OrchestratorMcpFailure") return null;
   const structured = object(result.structuredContent);
