@@ -251,8 +251,9 @@ export interface HandoffLauncher {
   /** Why the stored target is no longer valid (gone, not eligible, folder changed), or null. Throws when T3 can't say. */
   invalidTarget(proposal: HandoffProposal): Promise<string | null>;
   /**
-   * Sends the stored launch. Throws an error with `refused: true` when T3 answered that it did not
-   * launch; any other error (a timeout, a dropped socket) means the thread may exist.
+   * Sends the stored launch. Throws an error with `refused: true` when it did not launch: `sent: true`
+   * if T3 answered the launch with a failure, `sent: false` if it was never sent. Any other error (a
+   * timeout, a dropped socket) means the thread may exist.
    */
   launch(proposal: HandoffProposal): Promise<void>;
   /** Whether T3 has the thread; throws when T3 can't say. */
@@ -427,6 +428,8 @@ export function createHandoffs({ file, allowlistFile, launcher = null, now = () 
       });
       throw gone ? failure(`This proposal can no longer be approved: ${reason}`, 409) : failure(`The project's read-only copy was not made: ${reason}`, 422);
     }
+    // A retry: an earlier launch of this proposal is still unconfirmed, and may yet produce the thread.
+    const retry = proposal.status === "launching";
     // Recorded before T3 hears of it: from here on the thread may exist, so nobody may reject it.
     proposal = await update(slug, id, (current) => {
       if (!waiting(current)) throw failure(`This proposal was already ${current.status}.`, 409);
@@ -438,7 +441,13 @@ export function createHandoffs({ file, allowlistFile, launcher = null, now = () 
       await launcher.launch(proposal);
     } catch (error) {
       const reason = oneLine((error as Error)?.message ?? error, 300);
-      if ((error as { refused?: unknown })?.refused === true) {
+      const { refused, sent } = (error ?? {}) as { refused?: unknown; sent?: unknown };
+      // A retry that was never sent says nothing about the earlier launch: it stays launching. Only
+      // T3 answering this command with a failure, or a first try that never left, settles it.
+      if (refused === true && retry && sent !== true) {
+        throw failure(`It couldn't be sent again (${reason}). The earlier try may still start the thread; Threebot keeps checking T3.`, 502);
+      }
+      if (refused === true) {
         await update(slug, id, (current) => {
           if (current.status !== "launching") return;
           current.status = "pending";

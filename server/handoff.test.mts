@@ -522,3 +522,41 @@ test("a handoff thread runs on a Claude model, whatever the project defaults to"
   // Without T3's provider list nothing can be shown to be Claude.
   assert.equal(pickHandoffModel([work], null, fallback), fallback);
 });
+
+test("a retry that never reaches T3 leaves the first launch's outcome open", async (t) => {
+  const { propose, handoffs, t3 } = await setup(t);
+  const { proposal } = await propose();
+  // The first launch is sent and never confirmed.
+  t3.script.launch = async () => { throw new Error("socket closed 1006"); };
+  await assert.rejects(handoffs.approve("reader", proposal.id), { status: 504 });
+  // Approve again: this time it fails before anything is sent (T3 could not list its projects).
+  t3.script.launch = async () => { throw Object.assign(new Error("T3 timed out"), { refused: true, sent: false }); };
+  await assert.rejects(handoffs.approve("reader", proposal.id), { status: 502, message: /couldn't be sent again.*earlier try may still start/ });
+  const still = await handoffs.get("reader", proposal.id);
+  assert.equal(still.status, "launching");
+  assert.equal(still.lastError, undefined);
+  await assert.rejects(handoffs.reject("reader", proposal.id), { status: 409 });
+  // The thread from the first launch appears after all: the card is launched, not failed.
+  t3.threads.add(proposal.launch.threadId);
+  assert.equal((await handoffs.get("reader", proposal.id)).status, "launched");
+});
+
+test("T3 answering the same command with a failure does settle a retry", async (t) => {
+  const { propose, handoffs, t3 } = await setup(t);
+  const { proposal } = await propose();
+  t3.script.launch = async () => { throw new Error("socket closed 1006"); };
+  await assert.rejects(handoffs.approve("reader", proposal.id), { status: 504 });
+  t3.script.launch = async () => { throw Object.assign(new Error("Unknown project"), { refused: true, sent: true }); };
+  await assert.rejects(handoffs.approve("reader", proposal.id), { status: 502, message: /T3 did not launch the thread: Unknown project/ });
+  const back = await handoffs.get("reader", proposal.id);
+  assert.equal(back.status, "pending");
+  assert.equal(back.lastError, "Unknown project");
+});
+
+test("a first try that never left goes back to waiting with the reason", async (t) => {
+  const { propose, handoffs, t3 } = await setup(t);
+  const { proposal } = await propose();
+  t3.script.launch = async () => { throw Object.assign(new Error("T3 timed out"), { refused: true, sent: false }); };
+  await assert.rejects(handoffs.approve("reader", proposal.id), { status: 502 });
+  assert.equal((await handoffs.get("reader", proposal.id)).status, "pending");
+});

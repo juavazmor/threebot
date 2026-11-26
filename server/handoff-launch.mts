@@ -106,7 +106,8 @@ export function threadNotFound(error: unknown): boolean {
   });
 }
 
-const refused = (error: unknown) => Object.assign(error instanceof Error ? error : new Error(String(error)), { refused: true });
+/** `sent`: T3 itself answered the launch with a failure; false when the launch was never sent. */
+const refused = (error: unknown, sent: boolean) => Object.assign(error instanceof Error ? error : new Error(String(error)), { refused: true, sent });
 
 export function createHandoffLauncher({ evaluatorDir, rpc, projects, eligible, models }: {
   /** Absolute; HANDOFF_EVALUATOR_DIR. */
@@ -171,12 +172,12 @@ export function createHandoffLauncher({ evaluatorDir, rpc, projects, eligible, m
         modelSelection = pickHandoffModel([target?.defaultModelSelection, appDefault], providers, fallback);
         projectId = await evaluatorProject(modelSelection);
       } catch (error) {
-        throw refused(error);
+        throw refused(error, false);
       }
       try {
         await timed(launchHandoffThread({ rpc, proposal, projectId, modelSelection }), LAUNCH_MS, "T3 timed out");
       } catch (error) {
-        throw t3Refused(error) ? refused(error) : error;
+        throw t3Refused(error) ? refused(error, true) : error;
       }
     },
 

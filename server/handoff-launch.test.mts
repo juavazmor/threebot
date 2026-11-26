@@ -58,6 +58,8 @@ async function setup(t: TestContext, { settings = true }: { settings?: boolean }
   const t3 = {
     launch: async (_payload: any): Promise<unknown> => ({}),
     threadAnswer: null as ((threadId: string) => Promise<unknown>) | null,
+    /** T3 can't list its projects: a launch fails before anything is sent. */
+    projectsDown: false,
   };
   const rpc = {
     async call(tag: string, payload: any) {
@@ -81,7 +83,7 @@ async function setup(t: TestContext, { settings = true }: { settings?: boolean }
     .filter((project) => !project.archivedAt && project.id !== "project-bot")
     .map((project) => ({ projectId: project.id, title: project.title ?? project.id, path: project.workspaceRoot! }));
   const launcher = createHandoffLauncher({
-    evaluatorDir, rpc, projects: async () => projects.filter((project) => !project.deletedAt), eligible,
+    evaluatorDir, rpc, projects: async () => { if (t3.projectsDown) throw new Error("T3 timed out"); return projects.filter((project) => !project.deletedAt); }, eligible,
     models: async () => ({ providers: [{ instanceId: "claudeAgent", driver: "claudeAgent" }, { instanceId: "codex", driver: "codex" }], appDefault: CLAUDE, fallback: CLAUDE }),
   });
   const allowlistFile = path.join(dir, "handoff-allowlist.json");
@@ -268,6 +270,14 @@ test("T3's own failure answer is told apart from a call that may have gone throu
   assert.equal((await handoffs.get("reader", dropped.id)).status, "launching");
   t3.threadAnswer = null;
   assert.equal(await launcher.threadExists("anything"), false);
+  // The launcher says whether a refusal came from T3 or from never sending the launch.
+  t3.launch = async () => { throw t3Failure("Unknown project"); };
+  await assert.rejects(launcher.launch(dropped), { refused: true, sent: true });
+  t3.projectsDown = true;
+  await assert.rejects(launcher.launch(dropped), { refused: true, sent: false });
+  t3.projectsDown = false;
+  t3.launch = async () => { throw new Error("socket closed 1006"); };
+  await assert.rejects(launcher.launch(dropped), (error: { refused?: unknown }) => error.refused === undefined);
 });
 
 test("only T3's own no-such-thread answer, by its structure, counts as a thread T3 does not have", async (t) => {
