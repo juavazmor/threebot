@@ -170,10 +170,10 @@ async function seed(root: string, scenario = 'basic') {
   if (scenario === 'adopt') await seedRepo(root);
   // One Bot may hand off to one sample project and to Gamma, and has a proposal for each waiting for the user.
   if (scenario === 'interactions') {
-    const { proposalId, bot, botName, threadId, projectId, projectTitle, projectDir, url, kind, evaluatorDir } = HANDOFF_FIXTURE;
+    const { proposalId, bot, botName, threadId, projectId, projectTitle, projectDir, url, kind, evaluatorDir, snapshotName } = HANDOFF_FIXTURE;
     // The project is a git repo with a commit: a handoff thread reads a read-only copy of that commit.
     const commit = await commitRepo(root, path.join(root, projectDir), HANDOFF_FIXTURE.files);
-    const snapshotPath = path.join(root, evaluatorDir, 'snapshots', proposalId);
+    const snapshotPath = path.join(root, evaluatorDir, 'snapshots', snapshotName);
     await mkdir(path.join(root, evaluatorDir, '.claude'), { recursive: true });
     await writeFile(path.join(root, evaluatorDir, '.claude', 'settings.json'), JSON.stringify({
       disableAllHooks: true,

@@ -1252,7 +1252,7 @@ test('chats can give permissions: the gateway keeps the block in each provider\'
 
 test('a handoff proposal is shown as stored, proposed only by an allowed Bot, and launched once when approved', { timeout: 45000 }, async () => {
   const fixture = await createFixture({ scenario: 'interactions' });
-  const { proposalId, bot, threadId, projectId, projectTitle, projectDir, url, kind, evaluatorDir } = HANDOFF_FIXTURE;
+  const { proposalId, bot, threadId, projectId, projectTitle, projectDir, url, kind, evaluatorDir, snapshotName } = HANDOFF_FIXTURE;
   const projectPath = path.join(fixture.root, projectDir);
   const mcp = async (slug: string | null, method: string, params: Json) => {
     const response = await fetch(fixture.url + '/mcp/bot', { method: 'POST', signal: AbortSignal.timeout(5000),
@@ -1278,7 +1278,7 @@ test('a handoff proposal is shown as stored, proposed only by an allowed Bot, an
     const shown = await fixture.request(`/api/bots/${bot}/handoffs/${proposalId}`);
     assert.equal(shown.status, 200);
     assert.equal(shown.body.status, 'pending');
-    const snapshotPath = path.join(fixture.root, evaluatorDir, 'snapshots', proposalId);
+    const snapshotPath = path.join(fixture.root, evaluatorDir, 'snapshots', snapshotName);
     const commit = execFileSync('git', ['-C', projectPath, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
     assert.equal(shown.body.commit, commit);
     assert.equal(shown.body.snapshotPath, snapshotPath);
@@ -1313,7 +1313,10 @@ test('a handoff proposal is shown as stored, proposed only by an allowed Bot, an
     // A proposal made through the tool fixes the project's commit too.
     const fresh = (await fixture.request(`/api/bots/${bot}/handoffs/${made.data.proposalId}`)).body;
     assert.equal(fresh.commit, commit);
-    assert.equal(fresh.snapshotPath, path.join(fixture.root, evaluatorDir, 'snapshots', made.data.proposalId));
+    // Its copy's folder has a random name the Bot was never told.
+    assert.match(fresh.snapshotPath, new RegExp(`^${path.join(fixture.root, evaluatorDir, 'snapshots')}/[0-9a-f]{64}$`));
+    assert.equal(fresh.snapshotPath.includes(made.data.proposalId), false);
+    assert.equal(JSON.stringify(made.data).includes(path.basename(fresh.snapshotPath)), false);
 
     // Untracked files in the live project never reach the copy the thread reads.
     await writeFile(path.join(projectPath, 'untracked.txt'), 'not committed\n');

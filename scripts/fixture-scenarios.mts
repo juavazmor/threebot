@@ -90,6 +90,8 @@ export const HANDOFF_FIXTURE = {
   files: { 'README.md': '# Sample app\nA disposable project for the handoff card.\n', '.gitignore': '.env\n' },
   /** The hardened folder handoff threads run in; T3 has no project for it until the first approval. */
   evaluatorDir: 'evaluator',
+  /** The project proposal's copy folder in evaluator/snapshots/: a random name, never the proposal id. */
+  snapshotName: '9c1e5b7a3d2f4e6081a7c9b3d5e7f90182a4c6e8b0d2f4a6c8e0b2d4f6a8c0e2',
   /** The proposal for another Bot: approving it posts the stored message to Gamma's main conversation. */
   toBot: {
     proposalId: '7e8f9a0b-1c2d-4e3f-8a5b-c6d7e8f9a0b1', url: 'https://example.com/sample-library',

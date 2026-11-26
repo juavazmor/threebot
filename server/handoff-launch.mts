@@ -15,7 +15,7 @@ import {
   handoffTargetType, launchHandoffThread, pickHandoffModel, projectionHasMessage, sendHandoffMessage,
   type HandoffBot, type HandoffLauncher, type HandoffProposal, type HandoffRpc, type HandoffTarget,
 } from "./handoff.mts";
-import { SnapshotError, ensureSnapshot, resolveCommit, snapshotPath, sweepSnapshots } from "./handoff-snapshot.mts";
+import { SNAPSHOT_EARLIER_VERSION, SnapshotError, ensureSnapshot, newSnapshotName, resolveCommit, snapshotNameOf, snapshotPath, sweepSnapshots } from "./handoff-snapshot.mts";
 
 export const EVALUATOR_PROJECT_TITLE = "Handoff evaluator";
 
@@ -222,10 +222,15 @@ export function createHandoffLauncher({ evaluatorDir, recordsDir, rpc, projects,
     },
 
     commitOf: (projectPath: string) => resolveCommit(projectPath),
-    snapshotPath: (proposalId: string) => snapshotPath(evaluatorDir, proposalId),
+    newSnapshotPath: () => snapshotPath(evaluatorDir, newSnapshotName()),
     async prepareSnapshot(proposal: HandoffProposal) {
       try {
-        await ensureSnapshot({ evaluatorDir, recordsDir, proposalId: proposal.id, projectId: proposal.projectId ?? "", projectPath: proposal.projectPath ?? "", commit: proposal.commit ?? "" });
+        // An earlier version named the copy after the proposal id, which the Bot was told: such a
+        // proposal is never exported, and neither is one whose evaluator folder is not this one.
+        const name = snapshotNameOf(proposal.snapshotPath);
+        if (!name) throw new SnapshotError(SNAPSHOT_EARLIER_VERSION, true);
+        if (proposal.snapshotPath !== snapshotPath(evaluatorDir, name)) throw new SnapshotError("the evaluator folder changed since the proposal; propose it again", true);
+        await ensureSnapshot({ evaluatorDir, recordsDir, proposalId: proposal.id, name, projectId: proposal.projectId ?? "", projectPath: proposal.projectPath ?? "", commit: proposal.commit ?? "" });
       } catch (error) {
         throw Object.assign(error instanceof Error ? error : new Error(String(error)), { invalid: error instanceof SnapshotError && error.invalid });
       }

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -45,7 +46,7 @@ function fakeLauncher() {
     launch: async (proposal) => { launched.push(structuredClone(proposal)); await script.launch(proposal); },
     arrived: async (proposal) => { if (script.existsThrows) throw new Error("socket closed"); return threads.has(arrival(proposal)); },
     commitOf: async () => { if (script.commit instanceof Error) throw script.commit; return script.commit; },
-    snapshotPath: (proposalId) => `${EVALUATOR}/snapshots/${proposalId}`,
+    newSnapshotPath: () => `${EVALUATOR}/snapshots/${randomBytes(32).toString("hex")}`,
     prepareSnapshot: async (proposal) => { snapshots.push(structuredClone(proposal)); await script.snapshot(proposal); },
     sweepSnapshots: async (proposals) => { sweeps.push(structuredClone(proposals)); },
   };
@@ -233,7 +234,8 @@ test("a proposal stores the exact message, privately, and a repeat from the same
   assert.equal(proposal.status, "pending");
   assert.equal(proposal.title, "Evaluate fit: example.com");
   assert.equal(proposal.commit, SHA);
-  assert.equal(proposal.snapshotPath, `${EVALUATOR}/snapshots/${proposal.id}`);
+  assert.match(proposal.snapshotPath!, new RegExp(`^${EVALUATOR}/snapshots/[0-9a-f]{64}$`));
+  assert.equal(proposal.snapshotPath!.includes(proposal.id), false);
   assert.equal(proposal.prompt, promptFor("https://example.com/tool", { snapshotPath: proposal.snapshotPath }));
   assert.equal((await stat(file)).mode & 0o777, 0o600);
   const again = await propose();

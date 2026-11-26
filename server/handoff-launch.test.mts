@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
@@ -184,7 +184,10 @@ test("an approved handoff runs in the evaluator's project, made once when T3 has
   const { handoffs, propose, calls, evaluatorDir, projects } = await setup(t);
   const first = (await propose("https://example.com/one")).proposal;
   const second = (await propose("https://example.org/two")).proposal;
-  assert.equal(first.snapshotPath, path.join(evaluatorDir, "snapshots", first.id));
+  // Each copy's folder has a random name of its own, unrelated to the proposal's id.
+  for (const proposal of [first, second]) assert.match(proposal.snapshotPath!, new RegExp(`^${path.join(evaluatorDir, "snapshots")}/[0-9a-f]{64}$`));
+  assert.notEqual(path.basename(first.snapshotPath!), path.basename(second.snapshotPath!));
+  assert.equal(first.snapshotPath!.includes(first.id), false);
   assert.ok(first.prompt.includes(`at commit ${first.commit}: ${first.snapshotPath}\n`));
   assert.equal(first.prompt.includes(projects[0].workspaceRoot!), false);
   // Two approvals at once make one evaluator project.
@@ -208,8 +211,45 @@ test("an approved handoff runs in the evaluator's project, made once when T3 has
     assert.deepEqual(launch.modelSelection, CLAUDE);
   }
   assert.equal(launches.find((launch) => launch.threadId === first.launch.threadId).initialMessage.text, first.prompt);
-  // Each approved thread's copy exists, with the project's tracked file.
-  for (const proposal of [first, second]) assert.deepEqual(await readdir(proposal.snapshotPath!), ["README.md"]);
+  // Each approved thread's copy exists, with the project's tracked file; a proposal's id opens nothing.
+  for (const proposal of [first, second]) {
+    assert.deepEqual(await readdir(proposal.snapshotPath!), ["README.md"]);
+    await assert.rejects(readFile(path.join(evaluatorDir, "snapshots", proposal.id, "README.md")), { code: "ENOENT" });
+  }
+});
+
+test("a proposal whose copy an earlier version named after its id, or that has no copy path, is invalid at approval and nothing is exported", async (t) => {
+  const { handoffs, propose, calls, evaluatorDir, dir } = await setup(t);
+  const named = (await propose("https://example.com/named")).proposal;
+  const missing = (await propose("https://example.org/missing")).proposal;
+  const moved = (await propose("https://example.net/moved")).proposal;
+  const file = path.join(dir, "handoffs.json");
+  const state = JSON.parse(await readFile(file, "utf8"));
+  for (const proposal of state.proposals) {
+    if (proposal.id === named.id) proposal.snapshotPath = path.join(evaluatorDir, "snapshots", named.id);
+    if (proposal.id === missing.id) delete proposal.snapshotPath;
+    if (proposal.id === moved.id) proposal.snapshotPath = path.join(dir, "old-evaluator", "snapshots", path.basename(moved.snapshotPath!));
+  }
+  await writeFile(file, JSON.stringify(state));
+  for (const proposal of [named, missing]) {
+    await assert.rejects(handoffs.approve("reader", proposal.id), { status: 409, message: /made by an earlier version of Threebot; propose it again/ });
+    const stored = await handoffs.get("reader", proposal.id);
+    assert.equal(stored.status, "invalid");
+    assert.match(stored.invalidReason!, /earlier version of Threebot; propose it again/);
+  }
+  await assert.rejects(handoffs.approve("reader", moved.id), { status: 409, message: /evaluator folder changed since the proposal/ });
+  assert.equal(calls.filter((call) => call.tag === "orchestration.launchThread").length, 0);
+  // Nothing was exported, under the id or anywhere else, and no record was made.
+  await assert.rejects(lstat(path.join(evaluatorDir, "snapshots", named.id)), { code: "ENOENT" });
+  // (The sweep after each approval may have made the empty snapshots folder.)
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const snapshots = path.join(evaluatorDir, "snapshots");
+  if (await lstat(snapshots).catch(() => null)) {
+    await chmod(snapshots, 0o700);
+    assert.deepEqual(await readdir(snapshots), []);
+    await chmod(snapshots, 0o311);
+  }
+  assert.deepEqual((await readdir(path.join(dir, "handoff-snapshots")).catch(() => [])).filter((name) => name !== ".layout"), []);
 });
 
 test("an existing evaluator project is found by its folder, and archived ones are not used", async (t) => {

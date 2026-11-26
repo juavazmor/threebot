@@ -42,8 +42,8 @@ export type HandoffStatus = "pending" | "launching" | "launched" | "rejected" | 
  * it runs in, so a project's own .claude/ or .mcp.json can't loosen them, and the evaluator's
  * hardened settings apply whatever project is evaluated. The project is only read, as a read-only
  * copy of one commit inside the evaluator folder. Every proposal's copy sits in the same execute-only
- * snapshots/ folder, under its proposal's random UUID: a thread can open its own copy by the path
- * its message names but can't list the others, and their records are kept outside the evaluator
+ * snapshots/ folder, under a random name of its own that the proposing Bot is never told: a thread
+ * can open its own copy by the path its message names but can't list or guess the others, and their records are kept outside the evaluator
  * folder. That holds because the evaluator has no shell and no write tools to change the folder's
  * mode (handoff-snapshot.mts).
  * `root` uses the evaluator folder as it is: no worktree, so no setup script runs.
@@ -280,7 +280,10 @@ export interface HandoffProposal {
   projectPath?: string;
   /** The commit the Bot's proposal fixed (full sha); approving exports exactly this one. */
   commit?: string;
-  /** Where the read-only copy of that commit is (or will be) exported; the prompt names it. */
+  /**
+   * Where the read-only copy of that commit is (or will be) exported; the prompt names it. Its last
+   * segment is the copy's secret name, so it is shown to the user and that proposal's thread only.
+   */
   snapshotPath?: string;
   /** A Bot target: its slug and display name when the Bot proposed. */
   targetBotSlug?: string;
@@ -369,8 +372,11 @@ export interface HandoffLauncher {
   arrived(proposal: HandoffProposal): Promise<boolean>;
   /** The commit checked out in the project's git repo; throws, with a message for the Bot, when there is none. */
   commitOf(projectPath: string): Promise<string>;
-  /** Where a proposal's read-only copy goes. */
-  snapshotPath(proposalId: string): string;
+  /**
+   * Where a new proposal's read-only copy will go. Its last segment is a capability (random, unrelated
+   * to the proposal's id): it goes into the proposal and its prompt, and never back to the Bot.
+   */
+  newSnapshotPath(): string;
   /**
    * Makes sure the proposal's copy of its commit exists and is complete, else exports it. Throws an
    * error with `invalid: true` when the commit is gone for good; any other error means it was not
@@ -711,7 +717,7 @@ export function createHandoffs({ file, allowlistFile, launcher = null, now = () 
           let commit: string;
           try { commit = await launcher.commitOf(project.path); }
           catch (error) { throw failure(oneLine((error as Error)?.message ?? error, 300), 400); }
-          const snapshotPath = launcher.snapshotPath(id);
+          const snapshotPath = launcher.newSnapshotPath();
           if (oneLine(snapshotPath, PROJECT_PATH_LIMIT) !== snapshotPath || !path.isAbsolute(snapshotPath)) throw failure("The evaluator's folder can't be shown safely.", 503);
           proposal = {
             ...common,

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { IncomingHttpHeaders } from "node:http";
 import { tmpdir } from "node:os";
@@ -37,30 +38,34 @@ async function setup(t: TestContext, allow: unknown = { reader: { projects: ["pr
     launch: async (proposal) => { if (t3.drops) throw new Error("T3 timed out"); launched.push(proposal); },
     arrived: async (proposal) => launched.some((sent) => sent.id === proposal.id),
     commitOf: async () => "0123456789abcdef0123456789abcdef01234567",
-    snapshotPath: (proposalId) => `/evaluator/snapshots/${proposalId}`,
+    newSnapshotPath: () => `/evaluator/snapshots/${randomBytes(32).toString("hex")}`,
     prepareSnapshot: async () => {},
     sweepSnapshots: async () => {},
   };
   const handoffs = createHandoffs({ file: path.join(dir, "handoffs.json"), allowlistFile, launcher });
   const proposed: HandoffProposal[] = [];
+  const logs: string[] = [];
   const tools = createBotTools({
     vault: {} as Vault,
     findBotByThread: async (threadId) => THREADS[threadId] ?? null,
     listTabs: async () => [],
     typeIntoTab: async () => {},
-    extra: createHandoffTools({ handoffs, onProposed: (proposal) => { proposed.push(proposal); } }),
+    extra: createHandoffTools({ handoffs, onProposed: (proposal) => { proposed.push(proposal); }, log: (line) => { logs.push(line); } }),
   });
   let id = 0;
+  /** Everything the tool answered, as the Bot receives it. */
+  const answers: string[] = [];
   const rpc = async (method: string, params: unknown, auth: McpAuth) => (await tools.handleRpc({ jsonrpc: "2.0", id: ++id, method, params }, auth))!;
   const listed = async (auth: McpAuth) => ((await rpc("tools/list", {}, auth)).result as { tools: { name: string; description: string; inputSchema: any }[] }).tools;
   const call = async (args: Record<string, unknown>, auth: McpAuth = READER) => {
     const response = await rpc("tools/call", { name: "handoff_propose", arguments: args }, auth);
+    answers.push(JSON.stringify(response));
     if (response.error) return { error: response.error.message, isError: true, data: null as any };
     const result = response.result as { content: { text: string }[]; isError?: boolean };
     return { error: result.isError ? result.content[0].text : null, isError: Boolean(result.isError), data: result.isError ? null : JSON.parse(result.content[0].text) };
   };
   const good = { target: "project:project-app", url: "https://example.com/tool", kind: "evaluate-fit", threadId: "thread-reader" };
-  return { handoffs, proposed, listed, call, good, allowlistFile, launched, t3 };
+  return { handoffs, proposed, listed, call, good, allowlistFile, launched, t3, answers, logs };
 }
 
 test("only a Bot on the allowlist is shown the tool, with its own targets", async (t) => {
@@ -166,7 +171,9 @@ test("the app reads a proposal and answers it, and nothing can edit it", async (
   assert.equal(shown.targetType, "project");
   assert.equal(shown.evaluatorDir, "/evaluator");
   assert.equal(shown.commit, "0123456789abcdef0123456789abcdef01234567");
-  assert.equal(shown.snapshotPath, `/evaluator/snapshots/${first}`);
+  // The signed-in user sees where the copy goes; the Bot never does.
+  assert.equal(shown.snapshotPath, (await handoffs.get("reader", first)).snapshotPath);
+  assert.match(shown.snapshotPath, /^\/evaluator\/snapshots\/[0-9a-f]{64}$/);
   assert.equal("launch" in shown, false);
 
   // Another Bot's address, a cross-site request, and every way of changing a proposal.
@@ -233,4 +240,31 @@ test("the tool lists every allowed target, projects by title and Bots by name, n
   const botTool = (await botsOnly.listed(READER)).find((candidate) => candidate.name === "handoff_propose")!;
   assert.deepEqual(botTool.inputSchema.properties.target.enum, ["bot:other"]);
   assert.match((await botsOnly.call(botsOnly.good)).error!, /target must be one of the targets you may propose to: bot:other/);
+});
+
+test("the copy's secret folder name never reaches the Bot: not in a result, a refusal or a log line", async (t) => {
+  const { call, good, handoffs, answers, logs, allowlistFile } = await setup(t, { reader: { projects: ["project-app", "project-site"] } });
+  const first = await call(good);
+  const repeat = await call(good);
+  const second = await call({ ...good, target: "project:project-site" });
+  assert.equal(repeat.data.proposalId, first.data.proposalId);
+  // Refusals after proposals exist: a closed field, a limit, a target taken off the list.
+  await call({ ...good, url: "https://example.org/a", note: "x" });
+  await call({ ...good, url: "https://example.org/b" });
+  await call({ ...good, url: "https://example.org/c" });
+  await writeFile(allowlistFile, JSON.stringify({ reader: { projects: ["project-site"] } }));
+  await call({ ...good, url: "https://example.org/d" });
+  assert.ok(answers.some((answer) => /still waiting for the user/.test(answer)), "a limit refusal was among the answers");
+  const names = await Promise.all([first, second].map(async ({ data }) => (await handoffs.get("reader", data.proposalId)).snapshotPath!.split("/").pop()!));
+  assert.notEqual(names[0], names[1]);
+  for (const name of names) {
+    assert.match(name, /^[0-9a-f]{64}$/);
+    assert.equal(name.includes(first.data.proposalId.replace(/-/g, "")), false);
+    // No eight characters of it in a row, anywhere the Bot or the log could see.
+    for (let at = 0; at + 8 <= name.length; at++) {
+      const part = name.slice(at, at + 8);
+      for (const text of [...answers, ...logs]) assert.equal(text.includes(part), false, `${part} in ${text}`);
+    }
+  }
+  assert.ok(logs.some((line) => line.includes(first.data.proposalId)));
 });
