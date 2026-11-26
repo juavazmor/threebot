@@ -30,29 +30,66 @@ export function mayEnter(facts: AuthFacts): boolean {
 
 export const trustLocalProcesses = (env = process.env): boolean => env.THREEBOT_TRUST_LOCAL === "true";
 
+/** One sign-in being checked. `wait` holds it back by what earlier wrong passwords earned. */
+export type LoginAttempt = {
+  wait(): Promise<void>;
+  /** Frees its place. "wrong" counts against later attempts; "void" is one that never checked a password. */
+  done(outcome: "ok" | "wrong" | "void"): void;
+};
+
 /**
- * Failed sign-ins, counted per caller and overall. The caller's address comes from a proxy header
- * that a local client can make up, so the overall count is what bounds guessing; it also means a
- * burst of wrong passwords holds everyone's sign-in for the window. Open sessions are not affected.
+ * Slows password guessing without giving anyone a switch that locks the user out. A local caller
+ * can claim any address, so nothing here blocks for minutes: wrong passwords make the next checks
+ * wait, doubling up to a few seconds, for that caller and (more slowly) for everyone, and only a
+ * few checks run at once. A place is taken before any waiting, so a burst cannot slip past.
  */
-export function createLoginLimiter({ perCaller = 5, overall = 30, windowMs = 15 * 60_000, now = () => Date.now() }: { perCaller?: number; overall?: number; windowMs?: number; now?: () => number } = {}) {
-  const byCaller = new Map<string, number[]>();
-  const fresh = (times: number[]) => times.filter((time) => now() - time < windowMs);
-  const total = () => [...byCaller.values()].reduce((sum, times) => sum + fresh(times).length, 0);
+export function createLoginLimiter({ perCaller = 1, overall = 3, baseDelayMs = 250, maxDelayMs = 3_000, windowMs = 15 * 60_000, holdMs = 20_000, now = () => Date.now(), sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)) }: {
+  /** Checks one caller may have running, and all callers together; more are told to try again. */
+  perCaller?: number; overall?: number;
+  baseDelayMs?: number; maxDelayMs?: number; windowMs?: number;
+  /** A place not given back within this time (a caller that stopped sending) is freed. */
+  holdMs?: number;
+  now?: () => number; sleep?: (ms: number) => Promise<void>;
+} = {}) {
+  const wrong = new Map<string, number[]>();
+  const running = new Map<string, number>();
+  let runningAll = 0;
+  const fresh = (times: number[] | undefined) => (times ?? []).filter((time) => now() - time < windowMs);
+  const delayFor = (caller: string) => {
+    let everyone = 0;
+    for (const times of wrong.values()) everyone += fresh(times).length;
+    // A caller that changes its address with every try still meets everyone's count.
+    const steps = Math.max(fresh(wrong.get(caller)).length, Math.floor(everyone / 4));
+    return steps === 0 ? 0 : Math.min(maxDelayMs, baseDelayMs * 2 ** (steps - 1));
+  };
   return {
-    blocked(caller: string): boolean {
-      return fresh(byCaller.get(caller) ?? []).length >= perCaller || total() >= overall;
-    },
-    failed(caller: string) {
-      for (const [key, times] of byCaller) {
-        const kept = fresh(times);
-        if (kept.length) byCaller.set(key, kept); else byCaller.delete(key);
-      }
-      byCaller.set(caller, [...(byCaller.get(caller) ?? []), now()]);
-    },
-    /** A correct password clears that caller's count; the overall one runs out by itself. */
-    succeeded(caller: string) {
-      byCaller.delete(caller);
+    delayFor,
+    /** Takes a place for this caller, or null when too many checks are already running. Never waits. */
+    begin(caller: string): LoginAttempt | null {
+      if ((running.get(caller) ?? 0) >= perCaller || runningAll >= overall) return null;
+      running.set(caller, (running.get(caller) ?? 0) + 1);
+      runningAll++;
+      let open = true;
+      const attempt: LoginAttempt = {
+        wait: () => { const ms = delayFor(caller); return ms ? sleep(ms) : Promise.resolve(); },
+        done(outcome) {
+          if (!open) return;
+          open = false;
+          clearTimeout(expiry);
+          runningAll--;
+          const left = (running.get(caller) ?? 1) - 1;
+          if (left > 0) running.set(caller, left); else running.delete(caller);
+          if (outcome === "ok") wrong.delete(caller);
+          if (outcome !== "wrong") return;
+          for (const [key, times] of wrong) { const kept = fresh(times); if (kept.length) wrong.set(key, kept); else wrong.delete(key); }
+          // Made-up addresses must not grow this without bound: the oldest callers go first.
+          while (wrong.size >= 2_000) wrong.delete(wrong.keys().next().value!);
+          wrong.set(caller, [...(wrong.get(caller) ?? []), now()]);
+        },
+      };
+      const expiry = setTimeout(() => attempt.done("void"), holdMs);
+      expiry.unref?.();
+      return attempt;
     },
   };
 }

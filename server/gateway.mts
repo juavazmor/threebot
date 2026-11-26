@@ -220,12 +220,14 @@ function cookies(req: IncomingMessage) {
   }
   return out;
 }
-function clientIp(req: IncomingMessage) {
-  // The last hop is the one our proxy (Tailscale Serve or Funnel, Cloudflare) added; earlier entries
-  // come from the client. A request that came straight to the port has no proxy, so its header is
-  // the client's own words and the socket's address is used instead.
-  const proxied = onTailnet(req, exposure) || Boolean(req.headers["cf-ray"]);
-  return (proxied && String(req.headers["x-forwarded-for"] ?? "").split(",").pop()!.trim()) || req.socket.remoteAddress || "?";
+/**
+ * Who is signing in, for the limiter. Only the tailnet listener has a proxy of ours in front (Tailscale
+ * Serve), whose last forwarded hop is the device; everywhere else a forwarding header is the caller's
+ * own words (anyone can send cf-ray), so the socket's address is used.
+ */
+function loginCaller(req: IncomingMessage) {
+  const forwarded = onTailnet(req, exposure) ? String(req.headers["x-forwarded-for"] ?? "").split(",").pop()!.trim() : "";
+  return forwarded ? `tailnet:${forwarded}` : req.socket.remoteAddress || "?";
 }
 const logins = createLoginLimiter();
 function isHttps(req: IncomingMessage) {
@@ -1361,18 +1363,27 @@ const server = http.createServer(async (req, res) => {
       return send(res, 403, { error: "cross-site request refused" });
     }
     if (p === "/api/login" && req.method === "POST") {
-      const ip = clientIp(req);
-      if (logins.blocked(ip)) return send(res, 429, { error: "Too many attempts. Try again in 15 minutes." });
-      const { password } = await readBody(req, 4096);
-      if (!(await passwordRequired())) {
-        // A session is only worth something where a password made it.
-        if (!trustsLocal) return send(res, 409, { error: "No password is set on this server. Set one there with `threebot password`." });
-      } else if (!(await passwordMatches(password))) {
-        logins.failed(ip);
-        console.warn(`failed login from ${ip}`);
-        return send(res, 401, { error: "wrong password" });
+      // Its place is taken before anything is awaited, so many requests at once cannot all get through.
+      const caller = loginCaller(req);
+      const attempt = logins.begin(caller);
+      if (!attempt) return send(res, 429, { error: "Too many sign-ins at once. Try again in a moment." });
+      let outcome: "ok" | "wrong" | "void" = "void";
+      try {
+        const { password } = await readBody(req, 4096);
+        if (!(await passwordRequired())) {
+          // A session is only worth something where a password made it.
+          if (!trustsLocal) return send(res, 409, { error: "No password is set on this server. Set one there with `threebot password`." });
+        } else {
+          await attempt.wait();
+          outcome = (await passwordMatches(password)) ? "ok" : "wrong";
+          if (outcome === "wrong") {
+            console.warn(`failed login from ${caller}`);
+            return send(res, 401, { error: "wrong password" });
+          }
+        }
+      } finally {
+        attempt.done(outcome);
       }
-      logins.succeeded(ip);
       const secure = isHttps(req) ? "; Secure" : "";
       return send(res, 200, { ok: true }, { "set-cookie": `${COOKIE}=${makeSession()}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${30 * 24 * 3600}${secure}` });
     }

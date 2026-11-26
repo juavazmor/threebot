@@ -151,12 +151,19 @@ test('with the switch off, the public port asks for the session too', async () =
   } finally { await gateway.stop(); }
 });
 
-test('a caller that keeps guessing the password is held off, whatever address it claims', async () => {
+test('guessing the password gets slower, never locks the user out, and a burst does not get through', async () => {
   const gateway = await startGateway({});
   try {
-    for (let i = 0; i < 5; i++) assert.equal((await login(gateway.port, `guess ${i}`, { 'x-forwarded-for': `10.0.0.${i}` })).status, 401);
-    assert.equal((await login(gateway.port, 'one more', { 'x-forwarded-for': '10.0.0.99' })).status, 429);
-    assert.equal((await login(gateway.port, PASSWORD)).status, 429);
+    // A made-up forwarding header on the public port changes nothing: the caller is the socket.
+    const started = Date.now();
+    for (let i = 0; i < 3; i++) assert.equal((await login(gateway.port, `guess ${i}`, { 'x-forwarded-for': `10.0.0.${i}`, 'cf-ray': `ray-${i}` })).status, 401);
+    assert.ok(Date.now() - started >= 700, 'the second and third guesses waited');
+    // Twenty at once from one caller: one is checked (after its wait), the rest are told to try again.
+    const burst = await Promise.all(Array.from({ length: 20 }, (_, i) => login(gateway.port, `burst ${i}`).then((response) => response.status)));
+    assert.equal(burst.filter((status) => status === 401).length, 1);
+    assert.equal(burst.filter((status) => status === 429).length, 19);
+    // The right password still gets in, after the wait its caller earned.
+    assert.equal((await login(gateway.port, PASSWORD)).status, 200);
   } finally { await gateway.stop(); }
 });
 

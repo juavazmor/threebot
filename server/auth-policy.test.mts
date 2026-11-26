@@ -48,19 +48,59 @@ test("a valid Cloudflare Access token gets in without the password", () => {
   assert.equal(mayEnter(facts({ accessConfigured: true, accessVerified: false })), false);
 });
 
-test("wrong passwords are limited per caller and overall, for a window", () => {
+function limiter(extra: Parameters<typeof createLoginLimiter>[0] = {}) {
   const clock = { time: 1_000_000 };
-  const limiter = createLoginLimiter({ perCaller: 3, overall: 5, windowMs: 60_000, now: () => clock.time });
-  for (let i = 0; i < 3; i++) { assert.equal(limiter.blocked("a"), false); limiter.failed("a"); }
-  assert.equal(limiter.blocked("a"), true);
-  assert.equal(limiter.blocked("b"), false);
-  // A caller that changes its address with every try runs into the overall limit.
-  limiter.failed("b"); limiter.failed("c");
-  assert.equal(limiter.blocked("never-seen"), true);
+  const slept: number[] = [];
+  const logins = createLoginLimiter({ baseDelayMs: 100, maxDelayMs: 1_000, windowMs: 60_000, now: () => clock.time, sleep: async (ms) => { slept.push(ms); }, ...extra });
+  const guess = async (caller: string, outcome: "ok" | "wrong" = "wrong") => { const attempt = logins.begin(caller)!; await attempt.wait(); attempt.done(outcome); };
+  return { logins, clock, slept, guess };
+}
+
+test("wrong passwords make the next checks wait longer, up to a cap, and nobody is locked out", async () => {
+  const { logins, clock, slept, guess } = limiter();
+  for (let i = 0; i < 7; i++) await guess("a");
+  assert.deepEqual(slept, [100, 200, 400, 800, 1_000, 1_000]);
+  // After any number of wrong passwords the right one is still checked, only later.
+  for (let i = 0; i < 100; i++) await guess("a");
+  assert.notEqual(logins.begin("a"), null);
+  assert.equal(logins.delayFor("a"), 1_000);
   clock.time += 60_001;
-  assert.equal(limiter.blocked("a"), false);
-  assert.equal(limiter.blocked("never-seen"), false);
+  assert.equal(logins.delayFor("a"), 0);
+});
+
+test("a caller that changes its address with every try slows everyone a little, and blocks nobody", async () => {
+  const { logins, guess } = limiter();
+  for (let i = 0; i < 40; i++) await guess(`made-up-${i}`);
+  assert.equal(logins.delayFor("the-user"), 1_000);
+  const attempt = logins.begin("the-user");
+  assert.notEqual(attempt, null);
   // The right password clears that caller's own count.
-  limiter.failed("d"); limiter.failed("d"); limiter.succeeded("d"); limiter.failed("d");
-  assert.equal(limiter.blocked("d"), false);
+  attempt!.done("ok");
+  await guess("b"); await guess("b"); await guess("b", "ok");
+  assert.equal(logins.delayFor("b"), logins.delayFor("never-seen"));
+});
+
+test("a place is taken at once, and only a few checks run together", () => {
+  const { logins } = limiter();
+  const first = logins.begin("a");
+  assert.notEqual(first, null);
+  // The same caller again, before the first finished, is told to try again: a burst cannot all get through.
+  assert.equal(logins.begin("a"), null);
+  const others = [logins.begin("b"), logins.begin("c")];
+  assert.equal(others.includes(null), false);
+  assert.equal(logins.begin("d"), null);
+  first!.done("void");
+  assert.notEqual(logins.begin("d"), null);
+  // Giving a place back twice frees it once.
+  first!.done("wrong");
+  assert.equal(logins.begin("e"), null);
+  assert.equal(logins.delayFor("a"), 0);
+});
+
+test("a caller that never finishes does not keep its place", async () => {
+  const { logins } = limiter({ holdMs: 20 });
+  assert.notEqual(logins.begin("stalled"), null);
+  assert.equal(logins.begin("stalled"), null);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.notEqual(logins.begin("stalled"), null);
 });
