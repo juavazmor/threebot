@@ -39,7 +39,7 @@ async function startGateway() {
     env: {
       PATH: process.env.PATH, HOME: root, CODEX_HOME: path.join(root, "codex"), HOST: "127.0.0.1", PORT: String(port),
       BOTS_ROOT: path.join(root, "bots"), STATIC_DIR: path.join(root, "dist"), T3_URL: "http://127.0.0.1:1", T3_TOKEN: "fixture-only",
-      BOT_MCP_TOKEN: "fixture-only", BOT_PASSWORD: "", VAULT_FILE: path.join(root, "vault.enc"), VAULT_KEY_FILE: path.join(root, "vault-key"),
+      BOT_MCP_TOKEN: "fixture-only", BOT_PASSWORD: "", THREEBOT_TRUST_LOCAL: "true", VAULT_FILE: path.join(root, "vault.enc"), VAULT_KEY_FILE: path.join(root, "vault-key"),
       CF_ACCESS_TEAM_DOMAIN: "fixture.invalid", CF_ACCESS_AUD: "fixture", CF_ACCESS_EMAILS: "me@example.com",
       TAILNET_PORT: String(tailnet), TAILNET_USERS: "me@example.com",
     }, stdio: ["ignore", "pipe", "ignore"],

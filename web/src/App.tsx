@@ -361,8 +361,10 @@ function Login() {
           try {
             await api.login(password);
             location.reload();
-          } catch {
-            setError("Wrong password");
+          } catch (cause) {
+            // The server's own words when the password isn't the problem: none is set yet, or too many tries.
+            const status = (cause as { status?: number }).status;
+            setError(status === 409 || status === 429 ? (cause as Error).message : "Wrong password");
           }
         }}
         className="flex w-[300px] flex-col items-center"

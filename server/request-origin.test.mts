@@ -23,10 +23,14 @@ test("non-browser clients send no Origin and still depend on their credential", 
   assert.equal(sameOriginRequest(request({})), true);
 });
 
-test("loopback only passes in an open dev setup", () => {
-  assert.equal(sameOriginRequest(request({ origin: "http://localhost:5173" })), false);
-  assert.equal(sameOriginRequest(request({ origin: "http://localhost:5173" }), { allowLoopback: true }), true);
-  assert.equal(sameOriginRequest(request({ origin: "http://localhost.evil.example" }), { allowLoopback: true }), false);
+test("another page on this machine is another site, whatever its port", () => {
+  const local = (origin: string) => sameOriginRequest({ headers: { host: "127.0.0.1:3780", origin } });
+  assert.equal(local("http://127.0.0.1:3780"), true);
+  for (const origin of ["http://127.0.0.1:5173", "http://localhost:3780", "http://localhost:5173", "http://[::1]:3780", "https://127.0.0.1:3780.evil.example"]) {
+    assert.equal(local(origin), false, origin);
+  }
+  // A dev server on another port is named explicitly.
+  assert.equal(sameOriginRequest({ headers: { host: "127.0.0.1:3780", origin: "http://localhost:5180" } }, { allowed: allowedOrigins({ ALLOWED_ORIGINS: "http://localhost:5180" }) }), true);
 });
 
 test("extra origins are explicit", () => {

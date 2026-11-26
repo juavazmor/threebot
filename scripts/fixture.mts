@@ -79,6 +79,8 @@ export function gatewayInvocation(root: string, port: number, t3Port: number, ex
       OPENSSL_CONF: path.join(root, 'tmp', 'openssl.cnf'),
       HOST: '127.0.0.1', PORT: String(port), BOTS_ROOT: path.join(root, 'bots'), STATIC_DIR: staticDir,
       T3_URL: `http://127.0.0.1:${t3Port}`, T3_TOKEN: 'fixture-only', BOT_MCP_TOKEN: 'fixture-only', BOT_PASSWORD: '',
+      // The fixture has no password: every process on this machine may use it.
+      THREEBOT_TRUST_LOCAL: 'true',
       ...(existsSync(path.join(root, 'environments.json')) ? { T3_ENVIRONMENTS_FILE: path.join(root, 'environments.json') } : {}),
       T3_TOKEN_FILE: path.join(root, 'unused-token'), T3_SECRETS_DIR: path.join(root, 'secrets'),
       VAULT_FILE: path.join(root, 'vault', 'vault.enc'), VAULT_KEY_FILE: path.join(root, 'vault', 'vault-key'),

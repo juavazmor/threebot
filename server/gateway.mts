@@ -22,6 +22,7 @@ import { DEFAULT_MODEL, startProvisioner } from "./provisioner.mts";
 import { keepThreadsActive, settleQuietThreads } from "./auto-settle.mts";
 import { archivedBotIdentities } from "./bot-identities.mts";
 import { createConversationRoutes } from "./bot-conversations.mts";
+import { createLoginLimiter, mayEnter, trustLocalProcesses } from "./auth-policy.mts";
 import { createHandoffs, launchHandoffThread, pickHandoffModel, type HandoffProposal, type HandoffTarget } from "./handoff.mts";
 import { createHandoffTools } from "./handoff-mcp.mts";
 import { createHandoffRoutes } from "./handoff-routes.mts";
@@ -218,21 +219,14 @@ function cookies(req: IncomingMessage) {
   }
   return out;
 }
-// Login attempts per client: 5 failures lock that client out for 15 minutes.
-const attempts = new Map<string, { count: number; last: number }>();
 function clientIp(req: IncomingMessage) {
-  // The last hop is the one our proxy (Tailscale Funnel) added; earlier entries come from the client.
-  return String(req.headers["x-forwarded-for"] ?? "").split(",").pop()!.trim() || req.socket.remoteAddress || "?";
+  // The last hop is the one our proxy (Tailscale Serve or Funnel, Cloudflare) added; earlier entries
+  // come from the client. A request that came straight to the port has no proxy, so its header is
+  // the client's own words and the socket's address is used instead.
+  const proxied = onTailnet(req, exposure) || Boolean(req.headers["cf-ray"]);
+  return (proxied && String(req.headers["x-forwarded-for"] ?? "").split(",").pop()!.trim()) || req.socket.remoteAddress || "?";
 }
-function loginBlocked(ip: string) {
-  const a = attempts.get(ip);
-  return Boolean(a && a.count >= 5 && Date.now() - a.last < 15 * 60 * 1000);
-}
-function loginFailed(ip: string) {
-  const a = attempts.get(ip);
-  const fresh = !a || Date.now() - a.last > 15 * 60 * 1000;
-  attempts.set(ip, { count: fresh ? 1 : a.count + 1, last: Date.now() });
-}
+const logins = createLoginLimiter();
 function isHttps(req: IncomingMessage) {
   return req.headers["x-forwarded-proto"] === "https";
 }
@@ -245,7 +239,10 @@ const verifyAccess = createAccessVerifier({
   emails: accessEmails,
 });
 
-const originPolicy = { allowed: allowedOrigins(), allowLoopback: !verifyAccess };
+// Only this app's own pages (and the addresses listed in ALLOWED_ORIGINS) may change things or open
+// sockets. Another page on this machine is another site, whatever port it is on.
+const originPolicy = { allowed: allowedOrigins() };
+const trustsLocal = trustLocalProcesses();
 const exposure = exposureConfig();
 const envTailnet = exposure.tailnetPort > 0;
 const version = currentVersion();
@@ -467,16 +464,19 @@ async function passwordMatches(password: string) {
 }
 const publicPortClosed = (req: IncomingMessage) => exposure.landingOnly && !onTailnet(req, exposure);
 async function authed(req: IncomingMessage) {
-  // Tailscale identity is the only way in on this port, and it counts nowhere else.
-  if (onTailnet(req, exposure)) return tailnetUserAllowed(req, exposure);
   const jar = cookies(req);
-  if (verifyAccess) {
-    const accessToken = accessTokenFrom(req, jar);
-    if (accessToken && (await verifyAccess(accessToken))) return true;
-  }
-  if (await passwordRequired()) return validSession(jar[COOKIE]);
-  // No password: Cloudflare Access is the only way in. Without Access configured either, it's an open dev setup.
-  return !verifyAccess;
+  const tailnet = onTailnet(req, exposure);
+  // The tailnet port never accepts Cloudflare tokens, and a Tailscale login counts nowhere else.
+  const accessToken = !tailnet && verifyAccess ? accessTokenFrom(req, jar) : null;
+  return mayEnter({
+    tailnet,
+    tailnetUser: tailnet && tailnetUserAllowed(req, exposure),
+    accessConfigured: Boolean(verifyAccess),
+    accessVerified: Boolean(accessToken && verifyAccess && (await verifyAccess(accessToken))),
+    passwordSet: await passwordRequired(),
+    session: validSession(jar[COOKIE]),
+    trustLocal: trustsLocal,
+  });
 }
 
 // ---------- helpers ----------
@@ -1358,15 +1358,17 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === "/api/login" && req.method === "POST") {
       const ip = clientIp(req);
-      if (loginBlocked(ip)) return send(res, 429, { error: "Too many attempts. Try again in 15 minutes." });
+      if (logins.blocked(ip)) return send(res, 429, { error: "Too many attempts. Try again in 15 minutes." });
       const { password } = await readBody(req, 4096);
-      const ok = !(await passwordRequired()) || (await passwordMatches(password));
-      if (!ok) {
-        loginFailed(ip);
+      if (!(await passwordRequired())) {
+        // A session is only worth something where a password made it.
+        if (!trustsLocal) return send(res, 409, { error: "No password is set on this server. Set one there with `threebot password`." });
+      } else if (!(await passwordMatches(password))) {
+        logins.failed(ip);
         console.warn(`failed login from ${ip}`);
         return send(res, 401, { error: "wrong password" });
       }
-      attempts.delete(ip);
+      logins.succeeded(ip);
       const secure = isHttps(req) ? "; Secure" : "";
       return send(res, 200, { ok: true }, { "set-cookie": `${COOKIE}=${makeSession()}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${30 * 24 * 3600}${secure}` });
     }
@@ -1374,7 +1376,9 @@ const server = http.createServer(async (req, res) => {
     if (p === "/mcp/bot") return await handleMcpHttp(req, res, { tools: botTools, resolveAuth: resolveMcpAuth, readBody });
 
     if (p === "/api/session") {
-      const needsPassword = await passwordRequired();
+      const hasPassword = await passwordRequired();
+      // Without a password nobody signs in here, unless this server trusts every local process.
+      const needsPassword = hasPassword || !(trustsLocal || verifyAccess);
       // Cloudflare's login only helps requests that came through Cloudflare; on this machine or the LAN, use the password.
       const accessLogin = Boolean(verifyAccess) && !(needsPassword && !req.headers["cf-ray"]);
       return send(res, 200, { authenticated: await authed(req), passwordRequired: needsPassword, accessLogin });
@@ -1478,6 +1482,8 @@ const server = http.createServer(async (req, res) => {
     if (p === "/api/access" && req.method === "GET") return send(res, 200, { ...(await remoteAccess.status()), cloudflareAccess: verifyAccess ? { emails: accessEmails } : null });
     if (p === "/api/access/password" && req.method === "PUT") {
       const { password } = await readBody(req, 4096);
+      // The password is the only thing that tells the user from a local process; without it this server would answer nobody.
+      if ((password ?? null) === null && !trustsLocal && !verifyAccess) return send(res, 409, { error: "Threebot needs a password. Change it instead of removing it." });
       await remoteAccess.setPassword(password ?? null);
       // Everyone signs in again with the new password, open connections included; this browser gets a fresh session now.
       await rotateSessionSecret();
@@ -1992,6 +1998,8 @@ if (selfUpdating) startUpdateChecks(() => checkUpdates().then(autoUpdate.conside
 telemetry.start();
 server.listen(cfg.port, cfg.host, () => {
   console.log(`bot gateway on http://${cfg.host}:${cfg.port} → T3 ${cfg.t3Url}, bots in ${cfg.botsRoot}`);
+  if (trustsLocal) console.warn("THREEBOT_TRUST_LOCAL is on: without a password, any local process can use the app as you.");
+  else void passwordRequired().then((set) => { if (!set && !verifyAccess) console.warn("No password is set, so the app answers nobody. Set one with `threebot password`."); }).catch(() => {});
   // Windows restarts the gateway by PID: it has no service manager to ask. A read-only home only
   // costs that restart, so a failed write stays quiet.
   if (process.platform === "win32") {

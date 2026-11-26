@@ -35,7 +35,7 @@ test('gateway main-Bot endpoints persist replacement and reject unsafe hides/del
         env: {
           PATH: process.env.PATH, HOME: root, CODEX_HOME: path.join(root, 'codex'),
           HOST: '127.0.0.1', PORT: String(port), BOTS_ROOT: botsRoot, T3_URL: 'http://127.0.0.1:1',
-          T3_TOKEN: 'fixture-only', BOT_MCP_TOKEN: 'fixture-only', BOT_PASSWORD: '',
+          T3_TOKEN: 'fixture-only', BOT_MCP_TOKEN: 'fixture-only', BOT_PASSWORD: '', THREEBOT_TRUST_LOCAL: 'true',
           VAULT_FILE: path.join(root, 'vault.enc'), VAULT_KEY_FILE: path.join(root, 'vault-key'),
         }, stdio: ['ignore', 'pipe', 'pipe'],
       });
