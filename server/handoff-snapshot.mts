@@ -186,7 +186,12 @@ async function ownSnapshotsDir(evaluatorDir: string, create: boolean): Promise<s
     return info.isDirectory() && !info.isSymbolicLink() ? dir : null;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT" || !create) return null;
-    await fs.mkdir(dir, { mode: 0o700 });
+    // Two first exports at once both get here; the one that loses the race finds the folder made.
+    try { await fs.mkdir(dir, { mode: 0o700 }); }
+    catch (raced) {
+      if ((raced as NodeJS.ErrnoException).code !== "EEXIST") throw raced;
+      return ownSnapshotsDir(evaluatorDir, false);
+    }
     return dir;
   }
 }

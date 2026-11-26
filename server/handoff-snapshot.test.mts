@@ -183,3 +183,12 @@ test("the sweep does nothing when the snapshots folder is a symlink", async (t) 
   assert.deepEqual((await readdir(elsewhere)).sort(), [ID, `${ID}.json`].sort());
   await assert.rejects(ensureSnapshot({ evaluatorDir, proposalId: ID, projectId: "p", projectPath: dir, commit: "0123456789abcdef0123456789abcdef01234567" }), /not a plain folder/);
 });
+
+test("several first copies at once all get made, though only one of them makes the snapshots folder", async (t) => {
+  const { project, evaluatorDir } = await setup(t);
+  const commit = commitAll(project, "first");
+  const ids = Array.from({ length: 6 }, (_, index) => `${index}0000000-0000-4000-8000-000000000000`);
+  const records = await Promise.all(ids.map((proposalId) => ensureSnapshot({ evaluatorDir, proposalId, projectId: "project-app", projectPath: project, commit })));
+  assert.deepEqual(records.map((record) => record.proposalId), ids);
+  for (const id of ids) assert.equal(await readFile(path.join(snapshotPath(evaluatorDir, id), "README.md"), "utf8"), "# App\n");
+});

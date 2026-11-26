@@ -406,10 +406,13 @@ test("marking as failed a launch T3 did create records it as launched instead", 
 test("marking as failed is refused while an approval is in flight", async (t) => {
   const { propose, handoffs, t3 } = await setup(t);
   const { proposal } = await propose();
+  // Waits for the launch itself to be in T3's hands, however long the copy before it takes.
   let release!: () => void;
-  t3.script.launch = (sent) => new Promise<void>((resolve) => { release = () => { t3.threads.add(sent.launch.threadId); resolve(); }; });
+  let sentToT3!: () => void;
+  const inT3 = new Promise<void>((resolve) => { sentToT3 = resolve; });
+  t3.script.launch = (sent) => new Promise<void>((resolve) => { release = () => { t3.threads.add(sent.launch.threadId); resolve(); }; sentToT3(); });
   const approving = handoffs.approve("reader", proposal.id);
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await inT3;
   await assert.rejects(handoffs.fail("reader", proposal.id), { status: 409, message: /being launched/ });
   release();
   assert.equal((await approving).status, "launched");
