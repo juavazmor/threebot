@@ -1252,7 +1252,8 @@ test('chats can give permissions: the gateway keeps the block in each provider\'
 
 test('a handoff proposal is shown as stored, proposed only by an allowed Bot, and launched once when approved', { timeout: 45000 }, async () => {
   const fixture = await createFixture({ scenario: 'interactions' });
-  const { proposalId, bot, threadId, projectId, url, kind, botName } = HANDOFF_FIXTURE;
+  const { proposalId, bot, threadId, projectId, projectTitle, projectDir, url, kind, evaluatorDir } = HANDOFF_FIXTURE;
+  const projectPath = path.join(fixture.root, projectDir);
   const mcp = async (slug: string | null, method: string, params: Json) => {
     const response = await fetch(fixture.url + '/mcp/bot', { method: 'POST', signal: AbortSignal.timeout(5000),
       headers: { 'content-type': 'application/json', authorization: `Bearer ${slug ? tokenForBot('fixture-only', slug) : 'fixture-only'}` },
@@ -1277,8 +1278,10 @@ test('a handoff proposal is shown as stored, proposed only by an allowed Bot, an
     const shown = await fixture.request(`/api/bots/${bot}/handoffs/${proposalId}`);
     assert.equal(shown.status, 200);
     assert.equal(shown.body.status, 'pending');
-    assert.equal(shown.body.prompt, renderHandoffPrompt({ kind, url, botName }));
+    assert.equal(shown.body.prompt, renderHandoffPrompt({ kind, url, botSlug: bot, projectTitle, projectPath }));
+    assert.ok(shown.body.prompt.includes(`Project folder: ${projectPath}\n`));
     assert.equal(shown.body.projectTitle, 'Sample app');
+    assert.equal(shown.body.evaluatorDir, path.join(fixture.root, evaluatorDir));
     assert.deepEqual(shown.body.launchSettings, { runtimeMode: 'approval-required', interactionMode: 'plan', workspaceStrategy: { type: 'root' } });
     assert.equal('launch' in shown.body, false);
     assert.equal((await fixture.request(`/api/bots/alpha/handoffs/${proposalId}`)).status, 404);
@@ -1309,7 +1312,13 @@ test('a handoff proposal is shown as stored, proposed only by an allowed Bot, an
     assert.equal((await fixture.request(`/api/bots/${bot}/handoffs/${proposalId}/approve`, 'POST', {})).body.status, 'launched');
     const [launch, ...more] = await launches();
     assert.deepEqual(more, []);
-    assert.equal(launch.projectId, projectId);
+    // It runs in the evaluator's project, which the gateway made for the evaluator folder, not in the target.
+    const evaluator = (await fixture.request('/t3/api/projects')).body.projects.filter((project: Json) => project.workspaceRoot === path.join(fixture.root, evaluatorDir));
+    assert.equal(evaluator.length, 1);
+    assert.equal(evaluator[0].title, 'Handoff evaluator');
+    assert.equal(launch.projectId, evaluator[0].id);
+    assert.notEqual(launch.projectId, projectId);
+    assert.ok(launch.initialMessage.text.includes(`Project folder: ${projectPath}\n`));
     assert.equal(launch.title, 'Evaluate fit: example.com');
     assert.equal(launch.runtimeMode, 'approval-required');
     assert.equal(launch.interactionMode, 'plan');
@@ -1330,4 +1339,24 @@ test('a handoff proposal is shown as stored, proposed only by an allowed Bot, an
     await fixture.restart();
     assert.equal((await fixture.request(`/api/bots/${bot}/handoffs/${proposalId}`)).body.status, 'launched');
   } finally { rpc.close(); await fixture.close(); }
+});
+
+test('a handoff is neither proposed nor approved while the evaluator folder has no .claude/settings.json', { timeout: 45000 }, async () => {
+  const fixture = await createFixture({ scenario: 'interactions' });
+  const { proposalId, bot, threadId, projectId, kind, evaluatorDir } = HANDOFF_FIXTURE;
+  try {
+    await rm(path.join(fixture.root, evaluatorDir, '.claude', 'settings.json'));
+    const response = await fetch(fixture.url + '/mcp/bot', { method: 'POST', signal: AbortSignal.timeout(5000),
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${tokenForBot('fixture-only', bot)}` },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'handoff_propose', arguments: { projectId, url: 'https://example.org/x', kind, threadId } } }) });
+    const result = ((await response.json()) as Json).result;
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /settings\.json is missing/);
+    const approved = await fixture.request(`/api/bots/${bot}/handoffs/${proposalId}/approve`, 'POST', {});
+    assert.equal(approved.status, 503);
+    assert.match(approved.body.error, /settings\.json is missing/);
+    assert.equal((await fixture.request(`/api/bots/${bot}/handoffs/${proposalId}`)).body.status, 'pending');
+    assert.deepEqual((await fixture.request('/t3/fixture/handoff-launches')).body.launches, []);
+    assert.equal((await fixture.request(`/api/bots/${bot}/handoffs`)).body.proposals.length, 1);
+  } finally { await fixture.close(); }
 });

@@ -6,17 +6,15 @@
 //   POST /api/bots/:slug/handoffs/:id/reject
 // There is no route that edits a proposal: what was stored is what is shown and what is launched.
 import type { IncomingHttpHeaders } from "node:http";
-import { handoffView, type HandoffProposal, type Handoffs } from "./handoff.mts";
+import type { HandoffProposal, Handoffs } from "./handoff.mts";
 
 export type HandoffRequest = { method?: string; headers: IncomingHttpHeaders };
 
 const LISTED = 30;
 
-export function createHandoffRoutes<Req extends HandoffRequest, Res>({ handoffs, botExists, launch, onDecided = () => {}, send, requireJson, checkOrigin, log = () => {} }: {
+export function createHandoffRoutes<Req extends HandoffRequest, Res>({ handoffs, botExists, onDecided = () => {}, send, requireJson, checkOrigin, log = () => {} }: {
   handoffs: Handoffs;
   botExists: (slug: string) => Promise<boolean>;
-  /** Launches the stored proposal in T3; throws when T3 refuses. */
-  launch: (proposal: HandoffProposal) => Promise<unknown>;
   /** The card was answered (approved or rejected), here or on another device. */
   onDecided?: (proposal: HandoffProposal) => unknown;
   send: (res: Res, status: number, body: unknown, headers?: Record<string, string>) => void;
@@ -39,15 +37,15 @@ export function createHandoffRoutes<Req extends HandoffRequest, Res>({ handoffs,
         }
         if (!(await botExists(slug))) return send(res, 404, { error: "Bot not found" }), true;
         if (!id && method === "GET") {
-          const proposals = (await handoffs.list(slug)).slice(0, LISTED).map(handoffView);
+          const proposals = (await handoffs.list(slug)).slice(0, LISTED).map(handoffs.view);
           return send(res, 200, { proposals }, noStore), true;
         }
-        if (id && !action && method === "GET") return send(res, 200, handoffView(await handoffs.get(slug, id)), noStore), true;
+        if (id && !action && method === "GET") return send(res, 200, handoffs.view(await handoffs.get(slug, id)), noStore), true;
         if (id && action && method === "POST") {
-          const proposal = action === "approve" ? await handoffs.approve(slug, id, launch) : await handoffs.reject(slug, id);
+          const proposal = action === "approve" ? await handoffs.approve(slug, id) : await handoffs.reject(slug, id);
           log(`handoff: ${proposal.id} of bot ${slug} ${proposal.status}`);
           await Promise.resolve(onDecided(proposal)).catch(() => {});
-          return send(res, 200, handoffView(proposal), noStore), true;
+          return send(res, 200, handoffs.view(proposal), noStore), true;
         }
         return send(res, 405, { error: "method not allowed" }), true;
       } catch (error) {

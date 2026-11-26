@@ -23,7 +23,8 @@ import { keepThreadsActive, settleQuietThreads } from "./auto-settle.mts";
 import { archivedBotIdentities } from "./bot-identities.mts";
 import { createConversationRoutes } from "./bot-conversations.mts";
 import { createLoginLimiter, mayEnter, trustLocalProcesses } from "./auth-policy.mts";
-import { createHandoffs, launchHandoffThread, pickHandoffModel, type HandoffProposal, type HandoffTarget } from "./handoff.mts";
+import { createHandoffs, type HandoffProposal, type HandoffTarget } from "./handoff.mts";
+import { createHandoffLauncher } from "./handoff-launch.mts";
 import { createHandoffTools } from "./handoff-mcp.mts";
 import { createHandoffRoutes } from "./handoff-routes.mts";
 import { conversationIds, createMainBotRegistry, type Bot, type BotPatch } from "./main-bot.mts";
@@ -1119,8 +1120,20 @@ async function resolveMcpAuth(raw: string): Promise<McpAuth | null> {
 
 // ---------- Handoff proposals ----------
 // A Bot proposes work for a coding project, the user approves the exact message on a card, and the
-// gateway launches the thread. Who may propose where is in handoff-allowlist.json, written by hand.
-const handoffs = createHandoffs({ file: path.join(appDir, "handoffs.json"), allowlistFile: path.join(appDir, "handoff-allowlist.json") });
+// gateway launches the thread in the evaluator folder. Who may propose where is in
+// handoff-allowlist.json, written by hand; the evaluator folder and its settings are made by hand too.
+const handoffLauncher = createHandoffLauncher({
+  evaluatorDir: path.resolve(process.env.HANDOFF_EVALUATOR_DIR ?? path.join(dataRoot, "evaluator")),
+  rpc: roomRpc,
+  projects: t3Projects,
+  eligible: handoffTargets,
+  models: async () => {
+    const client = await withTimeout(t3rpc(), 10000, "T3 timed out");
+    const [config, settings] = await Promise.all([withTimeout(client.call("server.getConfig", {}), 15000, "T3 timed out").catch(() => null), getSettings()]);
+    return { providers: config?.providers, appDefault: settings.defaultModel, fallback: DEFAULT_MODEL };
+  },
+});
+const handoffs = createHandoffs({ file: path.join(appDir, "handoffs.json"), allowlistFile: path.join(appDir, "handoff-allowlist.json"), launcher: handoffLauncher });
 /** T3 projects a handoff may target: live ones that are not a Bot (a Bot's folder holds its memory). */
 async function handoffTargets(): Promise<HandoffTarget[]> {
   const [projects, bots] = await Promise.all([t3Projects(), listBots()]);
@@ -1146,7 +1159,7 @@ async function handoffPush(proposal: HandoffProposal, kind: "waiting" | "resolve
 }
 const handoffTools = createHandoffTools({
   handoffs,
-  projects: handoffTargets,
+  projects: handoffLauncher.targets,
   onProposed: (proposal) => handoffPush(proposal, "waiting"),
   log: (line) => console.log(line),
 });
@@ -1206,18 +1219,6 @@ const conversationRoutes = createConversationRoutes({
 const handoffRoutes = createHandoffRoutes({
   handoffs,
   botExists: async (slug) => Boolean(await getBot(slug)),
-  // The stored title and prompt go out as they are; only the model is chosen here.
-  launch: async (proposal) => {
-    const client = await withTimeout(t3rpc(), 10000, "T3 timed out");
-    const [project, config, settings] = await Promise.all([
-      t3Projects().then((list) => list.find((candidate) => candidate.id === proposal.projectId)),
-      withTimeout(client.call("server.getConfig", {}), 15000, "T3 timed out").catch(() => null),
-      getSettings(),
-    ]);
-    if (!project || project.archivedAt) throw new Error("that project is no longer available in T3");
-    const modelSelection = pickHandoffModel([project.defaultModelSelection, settings.defaultModel], config?.providers, DEFAULT_MODEL);
-    await withTimeout(launchHandoffThread({ rpc: roomRpc, proposal, modelSelection }), 30000, "T3 timed out");
-  },
   onDecided: (proposal) => handoffPush(proposal, "resolved"),
   send,
   requireJson,

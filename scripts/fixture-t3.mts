@@ -435,9 +435,18 @@ export async function startFakeT3(root: string, port = 0, { scenario = 'basic', 
           return exit(ws, id, { sequence: ++sequence });
         }
         // Making a Bot from a project, and a room's member threads.
+        // The gateway makes the handoff evaluator's project on the first approval, without making its folder.
+        if (scenario === 'interactions' && tag === 'projects.mutate' && payload.type === 'project.create') {
+          if (projects.some((p) => p.id === payload.projectId)) return fail(ws, id, 'Project already exists');
+          if (payload.createWorkspaceRootIfMissing !== false || payload.workspaceRoot !== path.join(root, HANDOFF_FIXTURE.evaluatorDir)) return fail(ws, id, 'Unexpected fixture project');
+          projects.push({ id: payload.projectId, title: payload.title, workspaceRoot: payload.workspaceRoot, defaultModelSelection: payload.defaultModelSelection, createdAt: STAMP, updatedAt: STAMP });
+          publish();
+          return exit(ws, id, { sequence: ++sequence });
+        }
         // An approved handoff: the launch is recorded as sent, and a repeated command launches nothing new.
+        // It runs only in the evaluator's project, never in the project it evaluates.
         if (scenario === 'interactions' && tag === 'orchestration.launchThread') {
-          if (payload.projectId !== HANDOFF_FIXTURE.projectId) return fail(ws, id, 'Unknown fixture project');
+          if (projects.find((p) => p.id === payload.projectId)?.workspaceRoot !== path.join(root, HANDOFF_FIXTURE.evaluatorDir)) return fail(ws, id, 'Unknown fixture project');
           if (!receipts.has(payload.commandId)) {
             handoffLaunches.push(structuredClone(payload));
             const thread = { ...makeThread('alpha'), id: payload.threadId, projectId: payload.projectId, title: payload.title, runtimeMode: payload.runtimeMode, interactionMode: payload.interactionMode, lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: payload.threadId } };

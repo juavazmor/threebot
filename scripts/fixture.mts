@@ -78,6 +78,7 @@ export function gatewayInvocation(root: string, port: number, t3Port: number, ex
       TMPDIR: path.join(root, 'tmp'), TMP: path.join(root, 'tmp'), TEMP: path.join(root, 'tmp'),
       OPENSSL_CONF: path.join(root, 'tmp', 'openssl.cnf'),
       HOST: '127.0.0.1', PORT: String(port), BOTS_ROOT: path.join(root, 'bots'), STATIC_DIR: staticDir,
+      HANDOFF_EVALUATOR_DIR: path.join(root, 'evaluator'),
       T3_URL: `http://127.0.0.1:${t3Port}`, T3_TOKEN: 'fixture-only', BOT_MCP_TOKEN: 'fixture-only', BOT_PASSWORD: '',
       // The fixture has no password: every process on this machine may use it.
       THREEBOT_TRUST_LOCAL: 'true',
@@ -150,12 +151,14 @@ async function seed(root: string, scenario = 'basic') {
   if (scenario === 'adopt') await seedRepo(root);
   // One Bot may hand off to one sample project, and has a proposal waiting for the user.
   if (scenario === 'interactions') {
-    const { proposalId, bot, botName, threadId, projectId, projectTitle, projectDir, url, kind } = HANDOFF_FIXTURE;
+    const { proposalId, bot, botName, threadId, projectId, projectTitle, projectDir, url, kind, evaluatorDir } = HANDOFF_FIXTURE;
     await mkdir(path.join(root, projectDir), { recursive: true });
+    await mkdir(path.join(root, evaluatorDir, '.claude'), { recursive: true });
+    await writeFile(path.join(root, evaluatorDir, '.claude', 'settings.json'), JSON.stringify({ permissions: { deny: ['Edit', 'Write'] } }, null, 2) + '\n');
     await writeFile(path.join(root, 'bots/.botapp/handoff-allowlist.json'), JSON.stringify({ [bot]: { projects: [projectId] } }, null, 2) + '\n');
     await writeFile(path.join(root, 'bots/.botapp/handoffs.json'), JSON.stringify({ version: 1, proposals: [{
       id: proposalId, botSlug: bot, botName, threadId, projectId, projectTitle, projectPath: path.join(root, projectDir), kind, url,
-      title: handoffTitle(kind, url), prompt: renderHandoffPrompt({ kind, url, botName }), status: 'pending', createdAt: new Date().toISOString(),
+      title: handoffTitle(kind, url), prompt: renderHandoffPrompt({ kind, url, botSlug: bot, projectTitle, projectPath: path.join(root, projectDir) }), status: 'pending', createdAt: new Date().toISOString(),
       launch: { threadId: 'fixture-handoff-thread', commandId: 'fixture-handoff-command' },
     }] }, null, 2) + '\n');
   }
@@ -237,7 +240,7 @@ export async function createFixture({ port = 0, scenario = 'basic', links }: { p
       await stopChild(child);
       const t3Port = fake!.port;
       await fake!.close();
-      for (const dir of ['home', 'codex', 'tmp', 'secrets', 'vault', 'samples', 'bots', 'projects']) await rm(path.join(root, dir), { recursive: true, force: true });
+      for (const dir of ['home', 'codex', 'tmp', 'secrets', 'vault', 'samples', 'bots', 'projects', 'evaluator']) await rm(path.join(root, dir), { recursive: true, force: true });
       await seed(root, scenario);
       executor?.reset();
       fake = await startFakeT3(root, t3Port, { scenario, executor: executor?.links, links });

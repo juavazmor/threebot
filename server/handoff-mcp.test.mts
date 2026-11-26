@@ -4,7 +4,7 @@ import type { IncomingHttpHeaders } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
-import { createHandoffs, type HandoffProposal } from "./handoff.mts";
+import { createHandoffs, type HandoffLauncher, type HandoffProposal } from "./handoff.mts";
 import { createHandoffTools } from "./handoff-mcp.mts";
 import { createHandoffRoutes } from "./handoff-routes.mts";
 import { createBotTools, type McpAuth } from "./vault-mcp.mts";
@@ -21,7 +21,15 @@ async function setup(t: TestContext, allow: unknown = { reader: { projects: ["pr
   t.after(() => rm(dir, { recursive: true, force: true }));
   const allowlistFile = path.join(dir, "handoff-allowlist.json");
   await writeFile(allowlistFile, JSON.stringify(allow));
-  const handoffs = createHandoffs({ file: path.join(dir, "handoffs.json"), allowlistFile });
+  const launched: HandoffProposal[] = [];
+  const launcher: HandoffLauncher = {
+    evaluatorDir: "/evaluator",
+    unavailable: async () => null,
+    invalidTarget: async () => null,
+    launch: async (proposal) => { launched.push(proposal); },
+    threadExists: async (threadId) => launched.some((proposal) => proposal.launch.threadId === threadId),
+  };
+  const handoffs = createHandoffs({ file: path.join(dir, "handoffs.json"), allowlistFile, launcher });
   const proposed: HandoffProposal[] = [];
   const tools = createBotTools({
     vault: {} as Vault,
@@ -40,7 +48,7 @@ async function setup(t: TestContext, allow: unknown = { reader: { projects: ["pr
     return { error: result.isError ? result.content[0].text : null, isError: Boolean(result.isError), data: result.isError ? null : JSON.parse(result.content[0].text) };
   };
   const good = { projectId: "project-app", url: "https://example.com/tool", kind: "evaluate-fit", threadId: "thread-reader" };
-  return { handoffs, proposed, listed, call, good, allowlistFile };
+  return { handoffs, proposed, listed, call, good, allowlistFile, launched };
 }
 
 test("only a Bot on the allowlist is shown the tool, with its own projects", async (t) => {
@@ -111,13 +119,11 @@ type FakeRequest = { method: string; headers: IncomingHttpHeaders };
 type FakeResponse = { status: number; body: any };
 
 test("the app reads a proposal and answers it, and nothing can edit it", async (t) => {
-  const { call, good, handoffs } = await setup(t);
-  const launched: HandoffProposal[] = [];
+  const { call, good, handoffs, launched } = await setup(t);
   const decided: string[] = [];
   const routes = createHandoffRoutes<FakeRequest, FakeResponse>({
     handoffs,
     botExists: async (slug) => slug === "reader" || slug === "other",
-    launch: async (proposal) => { launched.push(proposal); },
     onDecided: (proposal) => { decided.push(`${proposal.id}:${proposal.status}`); },
     send: (res, status, body) => { res.status = status; res.body = body; },
     requireJson: (req) => { if (req.headers["content-type"] !== "application/json") throw Object.assign(new Error("JSON required"), { status: 415 }); },
@@ -137,6 +143,7 @@ test("the app reads a proposal and answers it, and nothing can edit it", async (
   const shown = (await request("GET", `${base}/${first}`)).body;
   assert.equal(shown.prompt, (await handoffs.get("reader", first)).prompt);
   assert.equal(shown.kindLabel, "Evaluate fit");
+  assert.equal(shown.evaluatorDir, "/evaluator");
   assert.equal("launch" in shown, false);
 
   // Another Bot's address, a cross-site request, and every way of changing a proposal.
