@@ -36,7 +36,7 @@ export interface BotToolsDeps {
   tokenDir?: string | null;
   log?: (line: string) => void;
   secretFileTtlMs?: number;
-  extra?: ExtraTools | null | (() => ExtraTools | null | Promise<ExtraTools | null>);
+  extra?: ExtraTools | null | ((auth: McpAuth) => ExtraTools | null | Promise<ExtraTools | null>);
 }
 
 const PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -151,7 +151,8 @@ function toolJson(value: unknown): ToolResult {
  */
 /**
  * `extra` adds more tools to the same server (the Projects board): { tools, call(name, args, { botFor }) },
- * or a function returning that or null, asked on every request, so a switched-off feature's tools are neither listed nor callable.
+ * or a function returning that or null, asked on every request with its caller, so the tools of a switched-off feature,
+ * and ones this caller may not use, are neither listed nor callable.
  */
 export function createBotTools({ vault, findBotByThread, listTabs, typeIntoTab, secretsDir, tokenDir, log = () => {}, secretFileTtlMs = SECRET_FILE_TTL_MS, extra: extraTools = null }: BotToolsDeps) {
   // Files from an earlier run have no timer left to delete them.
@@ -289,7 +290,7 @@ export function createBotTools({ vault, findBotByThread, listTabs, typeIntoTab, 
     }
     const isNotification = !("id" in msg);
     const reply = (result: unknown): RpcResponse | null => (isNotification ? null : { jsonrpc: "2.0", id: msg.id, result });
-    const extra = typeof extraTools === "function" ? await extraTools() : extraTools;
+    const extra = typeof extraTools === "function" ? await extraTools(auth) : extraTools;
     switch (msg.method) {
       case "initialize": {
         const asked = msg.params?.protocolVersion;

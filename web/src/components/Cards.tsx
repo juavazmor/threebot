@@ -13,6 +13,7 @@ import type { Entry } from "../lib/transcript";
 import type { Bot } from "../lib/types";
 import { approvalDecision, approvalOptions, questionAnswers, requestQuestions, requestStatus, secretLink, secretStatus, type ApprovalDecision, type QuestionAnswers } from "../lib/runtimeRequests";
 import { finishQuestionDraft, questionDraft } from "../lib/questionDrafts";
+import { handoffApi, handoffRunsAs, handoffStatusLabel, type HandoffProposal } from "../lib/handoffs";
 import "./RequestCards.css";
 import "./AutomatedCard.css";
 import "./PageCard.css";
@@ -350,6 +351,93 @@ function SecretRequestCard({ entry, threadId }: SecretProps) {
 }
 
 // ---------- subagent ----------
+// ---------- handoff ----------
+// A Bot's proposal to start a coding thread in one of the user's projects. Everything shown comes
+// from the gateway's stored proposal, never from the Bot's message: the prompt on the card is the
+// text Approve sends, byte for byte.
+type HandoffProps = { entry: Extract<Entry, { kind: "handoff" }>; bot: Bot };
+export function HandoffCard(props: HandoffProps) {
+  return <HandoffProposalCard key={`${props.bot.slug}:${props.entry.proposalId}`} {...props} />;
+}
+
+function HandoffProposalCard({ entry, bot }: HandoffProps) {
+  const [proposal, setProposal] = useState<HandoffProposal | null>(null);
+  const [missing, setMissing] = useState(false);
+  const [busy, setBusy] = useState<"approve" | "reject" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const locked = useRef(false);
+  const pending = proposal?.status === "pending";
+
+  // Another device may answer the card, so a waiting one is read again every few seconds.
+  useEffect(() => {
+    let alive = true;
+    const read = () => handoffApi.get(bot.slug, entry.proposalId).then(
+      (value) => { if (alive && !locked.current) setProposal(value); },
+      (cause: { status?: number }) => { if (alive && cause?.status === 404) setMissing(true); },
+    );
+    void read();
+    const timer = proposal && !pending ? null : setInterval(read, 8_000);
+    return () => { alive = false; if (timer) clearInterval(timer); };
+  }, [bot.slug, entry.proposalId, pending, proposal === null]);
+
+  const act = async (action: "approve" | "reject") => {
+    if (!pending || locked.current) return;
+    locked.current = true;
+    setBusy(action);
+    setError(null);
+    try {
+      setProposal(await handoffApi[action](bot.slug, entry.proposalId));
+    } catch (cause) {
+      // The gateway's own words (a refused launch, an answer given elsewhere), never a raw transport error.
+      setError((cause as { status?: number }).status ? (cause as Error).message : "Couldn't reach Threebot. Try again.");
+      void handoffApi.get(bot.slug, entry.proposalId).then(setProposal, () => {});
+    } finally {
+      locked.current = false;
+      setBusy(null);
+    }
+  };
+
+  if (missing) {
+    return <CardShell><CardHeader icon={<Send size={14} />} title="Hand off to a project" status="Unavailable" />
+      <div className="rounded-[13px] bg-card-inner px-3.5 py-3 text-[13px] text-muted">This proposal is no longer kept.</div></CardShell>;
+  }
+  if (!proposal) {
+    return <CardShell><CardHeader icon={<Send size={14} />} title="Hand off to a project" status={<Spinner />} /></CardShell>;
+  }
+  return (
+    <CardShell>
+      <CardHeader icon={<Send size={14} />} title="Hand off to a project" status={handoffStatusLabel(proposal.status)} />
+      <div className="rounded-[13px] bg-card-inner px-3.5 py-3">
+        <div className="text-[14px]">{proposal.botName} proposes a new thread: {proposal.kindLabel}</div>
+        <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-[13px]">
+          <dt className="text-muted">Project</dt>
+          <dd><span>{proposal.projectTitle}</span> <span className="break-all text-muted">{proposal.projectPath}</span></dd>
+          <dt className="text-muted">Link</dt>
+          <dd><a className="break-all underline underline-offset-2" href={proposal.url} target="_blank" rel="noopener noreferrer">{proposal.url}</a></dd>
+          <dt className="text-muted">Runs as</dt>
+          <dd>{handoffRunsAs(proposal.launchSettings)}</dd>
+        </dl>
+        <div className="mt-2.5 text-[12.5px] text-muted">The thread starts with exactly this message:</div>
+        <pre className="mt-1 max-h-64 overflow-auto rounded-lg bg-active px-3 py-2 font-mono text-[12px] whitespace-pre-wrap" style={{ overflowWrap: "anywhere" }}>{proposal.prompt}</pre>
+        {pending && proposal.lastError && !error && <div className="mt-2 text-[12.5px] text-danger">The last try did not start: {proposal.lastError}</div>}
+      </div>
+      {pending && (
+        <div className="flex flex-wrap gap-2 px-1.5 pt-2 pb-1">
+          <Pill onClick={() => act("approve")} disabled={busy !== null}>{busy === "approve" ? "Starting…" : "Approve"}</Pill>
+          <div className="ml-auto"><Pill variant="ghost" onClick={() => act("reject")} disabled={busy !== null}>Reject</Pill></div>
+        </div>
+      )}
+      {proposal.status === "launched" && proposal.launchedThreadId && (
+        <div className="flex flex-wrap items-center gap-2 px-1.5 pt-2 pb-1">
+          <Pill variant="soft" onClick={() => selectThread(bot, proposal.launchedThreadId!)}>Open thread</Pill>
+          <span className="text-[12.5px] text-muted">Started in {proposal.projectTitle} as “{proposal.title}”.</span>
+        </div>
+      )}
+      {error && <div role="alert" className="px-2.5 pt-2 pb-1 text-[12.5px] text-danger">{error}</div>}
+    </CardShell>
+  );
+}
+
 export const SubagentCard = memo(function SubagentCard({ entry, bot, threadId }: { entry: Extract<Entry, { kind: "subagent" }>; bot: Bot; threadId: string }) {
   return <div className="subagent-card fade-up w-full max-w-[560px]"><SubagentRow bot={bot} parentThreadId={threadId} item={entry.item} /></div>;
 }, (previous, next) => previous.entry.item === next.entry.item && previous.threadId === next.threadId && sameTaskBot(previous.bot, next.bot));

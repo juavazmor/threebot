@@ -6,7 +6,7 @@ import { Avatar } from "./Avatar";
 import { botTextColor, bubbleColors } from "../lib/character";
 import { BotMention, BotEvent } from "./BotMention";
 import { BotExchange } from "./BotExchange";
-import { ApprovalCard, AutomatedCard, DateSep, ErrorLine, EventLine, FileCard, PageCard, QuestionCard, RoutineReportLine, SecretCard, SubagentCard, ToolImage, useBotsByThread } from "./Cards";
+import { ApprovalCard, AutomatedCard, DateSep, ErrorLine, EventLine, FileCard, HandoffCard, PageCard, QuestionCard, RoutineReportLine, SecretCard, SubagentCard, ToolImage, useBotsByThread } from "./Cards";
 import { WorkspaceFileContext, WorkspaceMessageImage, WorkspaceResourceViewer } from "./WorkspaceResource";
 import { workspaceFilePath, workspaceLinkPath } from "../lib/workspaceLinks";
 import { fileGlyphKind, fileTypeLabel, messageFileLinks, soloFileLinkParagraph, soloMarkdownLink, aboutFilePrompt } from "../lib/fileCards";
@@ -347,6 +347,8 @@ function EntryView({ entry, prev, bot, threadId, onOpenFile, onReply, accent, on
       return <QuestionCard entry={entry} threadId={threadId} />;
     case "secret":
       return <SecretCard entry={entry} threadId={threadId} />;
+    case "handoff":
+      return <HandoffCard entry={entry} bot={bot} />;
     case "subagent":
       return <SubagentCard entry={entry} bot={bot} threadId={threadId} />;
     case "plan":

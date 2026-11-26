@@ -4,6 +4,7 @@ import type { Bot, ModelSelection, Run, RuntimeRequest, ScheduledTask, TurnItem 
 import { botDelivery, shortToolName } from "./botMessages";
 import { questionAnswerMessageId } from "./runtimeRequests";
 import { parseReply } from "./reply";
+import { handoffProposalId } from "./handoffs";
 
 // Turns T3 turn items into chat entries: bubbles, cards and
 // a few centered event lines. Raw tool activity stays hidden.
@@ -20,6 +21,7 @@ export type Entry =
   | { kind: "approval"; id: string; item: TurnItem; request?: RuntimeRequest }
   | { kind: "question"; id: string; item: TurnItem; request?: RuntimeRequest }
   | { kind: "secret"; id: string; item: TurnItem }
+  | { kind: "handoff"; id: string; proposalId: string }
   | { kind: "subagent"; id: string; item: TurnItem }
   | { kind: "plan"; id: string; item: TurnItem }
   | { kind: "file"; id: string; path: string; item: TurnItem }
@@ -258,6 +260,16 @@ export function buildEntries(items: TurnItem[], ctx: Ctx): Entry[] {
         const name = shortTool(toolName(i));
         const input = parseInput(i);
         if (i.status === "failed") break;
+        if (name === "handoff_propose") {
+          // The card is the gateway's stored proposal; the call only says which one. A repeated
+          // proposal returns the same id, so its card moves down instead of showing twice.
+          const proposalId = i.status === "completed" ? handoffProposalId(outputText(i)) : null;
+          if (!proposalId) break;
+          const earlier = out.findIndex((entry) => entry.kind === "handoff" && entry.proposalId === proposalId);
+          if (earlier >= 0) out.splice(earlier, 1);
+          out.push({ kind: "handoff", id: i.id, proposalId });
+          break;
+        }
         if (/vault_save_(login|contact)$/.test(name)) {
           const out_ = outputText(i);
           if (i.status !== "completed" || !/"saved"\s*:\s*true/.test(out_)) break;
@@ -354,6 +366,7 @@ const PHRASES: [RegExp, string[]][] = [
   [/schedule_task|scheduled_task/, ["Setting up a routine"]],
   [/delegate_task|t3_thread_launch|t3_thread_send|task_status/, ["Checking with another Bot"]],
   [/request_secret/, ["Needs your input"]],
+  [/handoff_propose/, ["Preparing a handoff"]],
   [/vault_save/, ["Saving to your Vault"]],
   [/vault_fill/, ["Signing in"]],
   [/^executor|mcp/, ["Working in a connected app"]],

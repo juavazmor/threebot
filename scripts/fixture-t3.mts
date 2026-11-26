@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { crc32, deflateRawSync } from 'node:zlib';
-import { ACTIVITY_SAMPLES, AVATAR_PROVIDERS, AVATAR_SAMPLES, LANDING_SAMPLES, fixtureReleases, landingData, seedActivity, seedAvatars, seedInteractions, seedLatestT3, validateScenario, FIXTURE_SPEECH_MAX_BODY } from './fixture-scenarios.mts';
+import { ACTIVITY_SAMPLES, AVATAR_PROVIDERS, HANDOFF_FIXTURE, AVATAR_SAMPLES, LANDING_SAMPLES, fixtureReleases, landingData, seedActivity, seedAvatars, seedInteractions, seedLatestT3, validateScenario, FIXTURE_SPEECH_MAX_BODY } from './fixture-scenarios.mts';
 import type { FixtureInteractions, FixtureItem, FixtureModel, FixtureProject, FixtureRequest, FixtureRun, FixtureSample, FixtureThread } from './fixture-scenarios.mts';
 const require = createRequire(new URL('../server/package.json', import.meta.url));
 const { WebSocketServer } = require('ws');
@@ -108,6 +108,11 @@ export async function startFakeT3(root: string, port = 0, { scenario = 'basic', 
   const landing = scenario === 'landing' ? landingData() : null;
   const projects = samples.map((bot): FixtureProject => ({ id: `project-${bot.slug}`, title: bot.name,
     workspaceRoot: landing ? `/Users/sam/Threebot/${bot.slug}` : path.join(root, 'bots', bot.slug), defaultModelSelection: MODEL, createdAt: STAMP, updatedAt: STAMP }));
+  // The coding project the interactions scenario's handoff targets: not a Bot, outside the Bots folder.
+  if (scenario === 'interactions') projects.push({ id: HANDOFF_FIXTURE.projectId, title: HANDOFF_FIXTURE.projectTitle,
+    workspaceRoot: path.join(root, HANDOFF_FIXTURE.projectDir), defaultModelSelection: MODEL, createdAt: STAMP, updatedAt: STAMP });
+  /** What the gateway asked T3 to launch for an approved handoff, as sent. */
+  const handoffLaunches: Record<string, unknown>[] = [];
   const makeThread = (slug: string, child = false): FixtureThread => ({ id: `thread-${slug}${child ? '-child' : ''}`,
     projectId: `project-${slug}`, title: child ? (landing?.child.title ?? 'Sample child review') : samples.find((bot) => bot.slug === slug)!.name,
     status: 'idle', activeRunId: null, latestRunId: null, modelSelection: MODEL, runtimeMode: 'auto',
@@ -327,6 +332,7 @@ export async function startFakeT3(root: string, port = 0, { scenario = 'basic', 
       if (links && url.pathname.startsWith('/oauth/mcp/')) return mcpOAuth(req, res, url.pathname);
       if (links && url.pathname === '/mcp' && req.method === 'POST') return mcpCall(req, res);
       if (interactions && url.pathname === '/fixture/interactions' && req.method === 'GET') return json(res, 200, interactions.inspect());
+      if (scenario === 'interactions' && url.pathname === '/fixture/handoff-launches' && req.method === 'GET') return json(res, 200, { fixtureOnly: true, launches: handoffLaunches });
       if (interactions && url.pathname === '/fixture/interactions/fail-once' && req.method === 'POST') {
         const chunks: Buffer[] = [];
         let size = 0;
@@ -429,6 +435,23 @@ export async function startFakeT3(root: string, port = 0, { scenario = 'basic', 
           return exit(ws, id, { sequence: ++sequence });
         }
         // Making a Bot from a project, and a room's member threads.
+        // An approved handoff: the launch is recorded as sent, and a repeated command launches nothing new.
+        if (scenario === 'interactions' && tag === 'orchestration.launchThread') {
+          if (payload.projectId !== HANDOFF_FIXTURE.projectId) return fail(ws, id, 'Unknown fixture project');
+          if (!receipts.has(payload.commandId)) {
+            handoffLaunches.push(structuredClone(payload));
+            const thread = { ...makeThread('alpha'), id: payload.threadId, projectId: payload.projectId, title: payload.title, runtimeMode: payload.runtimeMode, interactionMode: payload.interactionMode, lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: payload.threadId } };
+            threads.push(thread);
+            items.set(thread.id, [{ id: `${thread.id}-message-1`, threadId: thread.id, ordinal: 1, type: 'user_message', runId: null, nodeId: null, providerThreadId: null, providerTurnId: null, nativeItemRef: null,
+              parentItemId: null, status: 'completed', title: null, startedAt: STAMP, completedAt: STAMP, updatedAt: STAMP, messageId: `${thread.id}-message-1`, text: payload.initialMessage?.text ?? '',
+              createdBy: 'user', creationSource: 'web', inputIntent: 'turn_start', attachments: [] }]);
+            runs.set(thread.id, []);
+            interactions?.requests.set(thread.id, []);
+            receipts.set(payload.commandId, { sequence: ++sequence });
+            publish();
+          }
+          return exit(ws, id, receipts.get(payload.commandId));
+        }
         if ((scenario === 'adopt' || scenario === 'rooms') && tag === 'orchestration.launchThread') {
           if (!projects.some((p) => p.id === payload.projectId)) return fail(ws, id, 'Unknown fixture project');
           const thread = { ...makeThread('alpha'), id: payload.threadId, projectId: payload.projectId, title: payload.title, lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: payload.threadId } };

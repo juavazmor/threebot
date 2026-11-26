@@ -16,7 +16,8 @@ import type { Readable } from 'node:stream';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { MODEL, SAMPLE_IMAGE, SAMPLE_TEXT, samplesFor, STAMP, startFakeT3, type FixtureLink } from './fixture-t3.mts';
 import { T3Client } from '../server/t3rpc.mts';
-import { LANDING_SECTIONS, LANDING_USER, fixtureReleases, validateScenario } from './fixture-scenarios.mts';
+import { HANDOFF_FIXTURE, LANDING_SECTIONS, LANDING_USER, fixtureReleases, validateScenario } from './fixture-scenarios.mts';
+import { handoffTitle, renderHandoffPrompt } from '../server/handoff.mts';
 import { startFakeExecutor } from './fixture-executor.mts';
 
 const repo = fileURLToPath(new URL('../', import.meta.url));
@@ -145,6 +146,17 @@ async function seed(root: string, scenario = 'basic') {
     : { userName: 'Sample User', theme: scenario === 'activity' ? 'system' : 'light', timezone: 'UTC', defaultModel: MODEL };
   await writeFile(path.join(root, 'bots/.botapp/settings.json'), JSON.stringify(settings) + '\n');
   if (scenario === 'adopt') await seedRepo(root);
+  // One Bot may hand off to one sample project, and has a proposal waiting for the user.
+  if (scenario === 'interactions') {
+    const { proposalId, bot, botName, threadId, projectId, projectTitle, projectDir, url, kind } = HANDOFF_FIXTURE;
+    await mkdir(path.join(root, projectDir), { recursive: true });
+    await writeFile(path.join(root, 'bots/.botapp/handoff-allowlist.json'), JSON.stringify({ [bot]: { projects: [projectId] } }, null, 2) + '\n');
+    await writeFile(path.join(root, 'bots/.botapp/handoffs.json'), JSON.stringify({ version: 1, proposals: [{
+      id: proposalId, botSlug: bot, botName, threadId, projectId, projectTitle, projectPath: path.join(root, projectDir), kind, url,
+      title: handoffTitle(kind, url), prompt: renderHandoffPrompt({ kind, url, botName }), status: 'pending', createdAt: new Date().toISOString(),
+      launch: { threadId: 'fixture-handoff-thread', commandId: 'fixture-handoff-command' },
+    }] }, null, 2) + '\n');
+  }
   // The notice an automatic update leaves: the app shows "Updated to v…" once.
   if (scenario === 'release-notes') await writeFile(path.join(root, 'bots/.botapp/auto-update.json'), JSON.stringify({ auto: true, notice: { kind: 'updated', version: packageVersion,
     from: fixtureReleases(packageVersion).previous, url: `https://github.com/RokaSwK/threebot/releases/tag/v${packageVersion}`, at: new Date().toISOString() } }) + '\n');

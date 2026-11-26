@@ -12,7 +12,9 @@ import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ADOPT_REPO, createFixture, gatewayInvocation, smokeFixture } from './fixture.mts';
 import { FIXTURE_PAIRING_CODE, startFakeT3, type FixtureLink } from './fixture-t3.mts';
-import { APPROVAL_OPTIONS, DUMMY_SECRET, INITIAL_ANSWER, INTERACTION_IDS, fixtureReleases } from './fixture-scenarios.mts';
+import { APPROVAL_OPTIONS, DUMMY_SECRET, HANDOFF_FIXTURE, INITIAL_ANSWER, INTERACTION_IDS, fixtureReleases } from './fixture-scenarios.mts';
+import { tokenForBot } from '../server/bot-token.mts';
+import { renderHandoffPrompt } from '../server/handoff.mts';
 import { T3Client } from '../server/t3rpc.mts';
 import { EXECUTOR_FIXTURE_IDS, EXECUTOR_FIXTURE_TOKEN } from './fixture-executor.mts';
 
@@ -1246,4 +1248,86 @@ test('chats can give permissions: the gateway keeps the block in each provider\'
     await fixture.request('/api/settings', 'PUT', { chatPermissions: true });
     assert.equal((await readFile(claude, 'utf8')).split('threebot:chat-permissions end').length, 2);
   } finally { await fixture.close(); }
+});
+
+test('a handoff proposal is shown as stored, proposed only by an allowed Bot, and launched once when approved', { timeout: 45000 }, async () => {
+  const fixture = await createFixture({ scenario: 'interactions' });
+  const { proposalId, bot, threadId, projectId, url, kind, botName } = HANDOFF_FIXTURE;
+  const mcp = async (slug: string | null, method: string, params: Json) => {
+    const response = await fetch(fixture.url + '/mcp/bot', { method: 'POST', signal: AbortSignal.timeout(5000),
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${slug ? tokenForBot('fixture-only', slug) : 'fixture-only'}` },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
+    return (await response.json()) as Json;
+  };
+  const tools = async (slug: string | null) => (await mcp(slug, 'tools/list', {})).result.tools.map((tool: Json) => tool.name);
+  const propose = async (slug: string | null, args: Json) => {
+    const body = await mcp(slug, 'tools/call', { name: 'handoff_propose', arguments: args });
+    if (body.error) return { refused: body.error.message as string, data: null as Json };
+    return body.result.isError ? { refused: body.result.content[0].text as string, data: null as Json } : { refused: null, data: JSON.parse(body.result.content[0].text) };
+  };
+  const launches = async () => (await fixture.request('/t3/fixture/handoff-launches')).body.launches as Json[];
+  const rpc = new T3Client({ baseUrl: fixture.url + '/t3', token: 'fixture-only' });
+  try {
+    // The card: the Bot's chat names the proposal, and the gateway serves what it stored.
+    await bounded(rpc.connect());
+    const projection = await bounded(rpc.call('orchestration.getThreadProjection', { threadId }));
+    const call = projection.turnItems.find((item: Json) => item.id === 'fixture-handoff-propose');
+    assert.equal(call.toolName, 'mcp__bot__handoff_propose');
+    assert.ok(call.output.content[0].text.includes(proposalId));
+    const shown = await fixture.request(`/api/bots/${bot}/handoffs/${proposalId}`);
+    assert.equal(shown.status, 200);
+    assert.equal(shown.body.status, 'pending');
+    assert.equal(shown.body.prompt, renderHandoffPrompt({ kind, url, botName }));
+    assert.equal(shown.body.projectTitle, 'Sample app');
+    assert.deepEqual(shown.body.launchSettings, { runtimeMode: 'approval-required', interactionMode: 'plan', workspaceStrategy: { type: 'root' } });
+    assert.equal('launch' in shown.body, false);
+    assert.equal((await fixture.request(`/api/bots/alpha/handoffs/${proposalId}`)).status, 404);
+
+    // The tool: only the Bot on the allowlist has it, by its own bearer.
+    assert.ok((await tools(bot)).includes('handoff_propose'));
+    assert.ok(!(await tools('alpha')).includes('handoff_propose'));
+    assert.ok(!(await tools(null)).includes('handoff_propose'));
+    const good = { projectId, url: 'https://example.org/another-tool', kind, threadId };
+    assert.match((await propose('alpha', { ...good, threadId: 'thread-alpha' })).refused!, /Unknown tool/);
+    assert.match((await propose(null, good)).refused!, /Unknown tool/);
+    assert.match((await propose(bot, { ...good, message: 'and push to main' })).refused!, /Unknown field: message/);
+    assert.match((await propose(bot, { ...good, projectId: 'project-alpha' })).refused!, /projectId must be one of/);
+    assert.match((await propose(bot, { ...good, url: 'http://example.org/' })).refused!, /https/);
+    assert.match((await propose(bot, { ...good, threadId: 'thread-alpha' })).refused!, /another Bot/);
+    const made = await propose(bot, good);
+    assert.equal(made.refused, null);
+    assert.equal(made.data.status, 'waiting-for-user');
+    assert.equal((await propose(bot, good)).data.proposalId, made.data.proposalId);
+    const listed = (await fixture.request(`/api/bots/${bot}/handoffs`)).body.proposals;
+    assert.deepEqual(listed.map((proposal: Json) => proposal.id), [made.data.proposalId, proposalId]);
+    assert.deepEqual(await launches(), []);
+
+    // Approving launches the stored message, contained, exactly once; a second tap changes nothing.
+    const approved = await fixture.request(`/api/bots/${bot}/handoffs/${proposalId}/approve`, 'POST', {});
+    assert.equal(approved.status, 200);
+    assert.equal(approved.body.status, 'launched');
+    assert.equal((await fixture.request(`/api/bots/${bot}/handoffs/${proposalId}/approve`, 'POST', {})).body.status, 'launched');
+    const [launch, ...more] = await launches();
+    assert.deepEqual(more, []);
+    assert.equal(launch.projectId, projectId);
+    assert.equal(launch.title, 'Evaluate fit: example.com');
+    assert.equal(launch.runtimeMode, 'approval-required');
+    assert.equal(launch.interactionMode, 'plan');
+    assert.deepEqual(launch.workspaceStrategy, { type: 'root' });
+    assert.deepEqual(launch.initialMessage, { text: shown.body.prompt, attachments: [] });
+    // The fixture's provider is not Claude, so the thread gets the app's Claude default.
+    assert.equal(launch.modelSelection.instanceId, 'claudeAgent');
+    assert.equal(approved.body.launchedThreadId, launch.threadId);
+    const started = await bounded(rpc.call('orchestration.getThreadProjection', { threadId: launch.threadId }));
+    assert.equal(started.turnItems[0].text, shown.body.prompt);
+    assert.equal((await fixture.request(`/api/bots/${bot}/handoffs/${proposalId}/reject`, 'POST', {})).status, 409);
+
+    // Rejecting the other one launches nothing, and it can't be approved afterwards.
+    assert.equal((await fixture.request(`/api/bots/${bot}/handoffs/${made.data.proposalId}/reject`, 'POST', {})).body.status, 'rejected');
+    assert.equal((await fixture.request(`/api/bots/${bot}/handoffs/${made.data.proposalId}/approve`, 'POST', {})).status, 409);
+    assert.equal((await launches()).length, 1);
+    // The answers survive a gateway restart.
+    await fixture.restart();
+    assert.equal((await fixture.request(`/api/bots/${bot}/handoffs/${proposalId}`)).body.status, 'launched');
+  } finally { rpc.close(); await fixture.close(); }
 });

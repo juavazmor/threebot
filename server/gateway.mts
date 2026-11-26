@@ -18,10 +18,13 @@ import { withFileLock } from "./file-lock.mts";
 import { tokenForBot, tokenMatches } from "./bot-token.mts";
 import { createSiteIcons, normalizeDomain } from "./site-icons.mts";
 import { createCompressionCache, encodeBody, isCompressible, pickEncoding } from "./static-compression.mts";
-import { startProvisioner } from "./provisioner.mts";
+import { DEFAULT_MODEL, startProvisioner } from "./provisioner.mts";
 import { keepThreadsActive, settleQuietThreads } from "./auto-settle.mts";
 import { archivedBotIdentities } from "./bot-identities.mts";
 import { createConversationRoutes } from "./bot-conversations.mts";
+import { createHandoffs, launchHandoffThread, pickHandoffModel, type HandoffProposal, type HandoffTarget } from "./handoff.mts";
+import { createHandoffTools } from "./handoff-mcp.mts";
+import { createHandoffRoutes } from "./handoff-routes.mts";
 import { conversationIds, createMainBotRegistry, type Bot, type BotPatch } from "./main-bot.mts";
 import {
   CLAUDE_FILE, CODEX_FILE, CONFIG_FILES, LOCAL_ENVIRONMENT, archiveAdoptedData, excludePatterns, gitRepo, mergeJsonFile, planAdoption,
@@ -74,7 +77,7 @@ import { applyChatPermissions } from "./chat-permissions.mts";
 import { aggregateTurnUsage, createTelemetry, MIN_T3_FOR_TOKENS, versionAtLeast, type PayloadInput } from "./telemetry.mts";
 import { accountsFromBuckets, createUsageLedger, nextScanWatermark, turnsFromProjection, usageDays, usageEntryFilter, type UsageEntry } from "./bot-usage.mts";
 import { AVATAR_BODY_LIMIT, avatarImagePatch, decodeAvatarImage, storeAvatarImage, readAvatarImage } from "./avatar-images.mts";
-import { APP_BADGE_URL, appBadgePng, botBadgePng, botFace, roomIdentity } from "./bot-icons.mts";
+import { APP_BADGE_URL, appBadgePng, botBadgePng, botFace, botIdentity, roomIdentity } from "./bot-icons.mts";
 
 /** What route handlers and helpers throw: an Error, optionally with the HTTP status and a code to show. */
 type HttpError = Error & { status?: number; code?: string };
@@ -870,7 +873,7 @@ async function freeSlug(name: string) {
 
 // ---------- Bots made from existing projects ----------
 /** A T3 project as /api/projects lists it; only the fields used here. */
-type T3ProjectRow = { id: string; title?: string; workspaceRoot?: string; deletedAt?: string | null; archivedAt?: string | null };
+type T3ProjectRow = { id: string; title?: string; workspaceRoot?: string; deletedAt?: string | null; archivedAt?: string | null; defaultModelSelection?: unknown };
 async function t3Projects(): Promise<T3ProjectRow[]> {
   const client = await withTimeout(t3rpc(), 10000, "T3 timed out");
   const { projects } = await withTimeout(client.http("/api/projects"), 15000, "T3 timed out");
@@ -1114,6 +1117,40 @@ async function resolveMcpAuth(raw: string): Promise<McpAuth | null> {
   return null;
 }
 
+// ---------- Handoff proposals ----------
+// A Bot proposes work for a coding project, the user approves the exact message on a card, and the
+// gateway launches the thread. Who may propose where is in handoff-allowlist.json, written by hand.
+const handoffs = createHandoffs({ file: path.join(appDir, "handoffs.json"), allowlistFile: path.join(appDir, "handoff-allowlist.json") });
+/** T3 projects a handoff may target: live ones that are not a Bot (a Bot's folder holds its memory). */
+async function handoffTargets(): Promise<HandoffTarget[]> {
+  const [projects, bots] = await Promise.all([t3Projects(), listBots()]);
+  return projects
+    .filter((project) => !project.archivedAt && !within(cfg.botsRoot, project.workspaceRoot!) && !bots.some((bot) => bot.projectId === project.id || samePath(bot.workspaceRoot, project.workspaceRoot!)))
+    .map((project) => ({ projectId: project.id, title: project.title ?? path.basename(project.workspaceRoot!), path: project.workspaceRoot! }));
+}
+/** A card waiting in a Bot's chat is a push of its own; answering it anywhere closes that notice. */
+async function handoffPush(proposal: HandoffProposal, kind: "waiting" | "resolved") {
+  const bot = await getBot(proposal.botSlug).catch(() => null);
+  if (!bot || (kind === "waiting" && (bot.hidden || bot.notifications === false))) return;
+  const slug = encodeURIComponent(bot.slug);
+  await pushStore.send({
+    title: bot.name,
+    body: kind === "waiting" ? `Wants to hand a link to ${proposal.projectTitle}` : "Answered",
+    tag: `handoff:${bot.slug}:${proposal.id}`,
+    url: `/?bot=${slug}&thread=${encodeURIComponent(proposal.threadId)}`,
+    bot: bot.slug,
+    ...await botIdentity(bot),
+    timestamp: Date.now(),
+    kind,
+  });
+}
+const handoffTools = createHandoffTools({
+  handoffs,
+  projects: handoffTargets,
+  onProposed: (proposal) => handoffPush(proposal, "waiting"),
+  log: (line) => console.log(line),
+});
+
 const botTools = createBotTools({
   vault,
   async findBotByThread(threadId: string) {
@@ -1125,7 +1162,7 @@ const botTools = createBotTools({
   secretsDir: cfg.t3SecretsDir,
   tokenDir: path.join(path.dirname(cfg.vaultKeyFile), "bot-secrets"),
   log: (line) => console.log(line),
-  extra: async () => combineExtras((await projectsOn()) ? projectTools : null),
+  extra: async (auth) => combineExtras((await projectsOn()) ? projectTools : null, await handoffTools(auth)),
 });
 const projectRoutes = createProjectRoutes({ projects, send, readBody, requireJson, enabled: projectsOn, log: (line) => console.log(line), checkOrigin: (req) => sameOriginRequest(req, originPolicy) });
 const roomRoutes = createRoomRoutes({
@@ -1160,6 +1197,28 @@ const conversationRoutes = createConversationRoutes({
   rpc: roomRpc,
   threads: () => shellThreads(false),
   defaults: launchDefaults,
+  send,
+  requireJson,
+  checkOrigin: (req) => sameOriginRequest(req, originPolicy),
+  log: (line) => console.log(line),
+});
+
+const handoffRoutes = createHandoffRoutes({
+  handoffs,
+  botExists: async (slug) => Boolean(await getBot(slug)),
+  // The stored title and prompt go out as they are; only the model is chosen here.
+  launch: async (proposal) => {
+    const client = await withTimeout(t3rpc(), 10000, "T3 timed out");
+    const [project, config, settings] = await Promise.all([
+      t3Projects().then((list) => list.find((candidate) => candidate.id === proposal.projectId)),
+      withTimeout(client.call("server.getConfig", {}), 15000, "T3 timed out").catch(() => null),
+      getSettings(),
+    ]);
+    if (!project || project.archivedAt) throw new Error("that project is no longer available in T3");
+    const modelSelection = pickHandoffModel([project.defaultModelSelection, settings.defaultModel], config?.providers, DEFAULT_MODEL);
+    await withTimeout(launchHandoffThread({ rpc: roomRpc, proposal, modelSelection }), 30000, "T3 timed out");
+  },
+  onDecided: (proposal) => handoffPush(proposal, "resolved"),
   send,
   requireJson,
   checkOrigin: (req) => sameOriginRequest(req, originPolicy),
@@ -1552,6 +1611,7 @@ const server = http.createServer(async (req, res) => {
     if (await projectRoutes.handle(req, res, url)) return;
     if (await roomRoutes.handle(req, res, url)) return;
     if (await conversationRoutes.handle(req, res, url)) return;
+    if (await handoffRoutes.handle(req, res, url)) return;
     if (p === "/api/thread-meta" && req.method === "GET") return send(res, 200, // A missing thread id is refused by threadMeta.get's own check.
       await threadMeta.get(url.searchParams.get("thread") as string), { "cache-control": "no-store" });
     if (p === "/api/thread-meta/reactions" && req.method === "POST") {
