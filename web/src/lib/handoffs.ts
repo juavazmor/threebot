@@ -1,9 +1,9 @@
 import { apiRequest } from "./api";
 import { resultObject } from "./botMessages";
 
-// A handoff proposal: a Bot asks, with a card in its chat, to start a coding thread for one of the
-// user's projects. The gateway keeps the proposal; the chat only knows its id (from the Bot's
-// handoff_propose call) and reads everything it shows from the gateway.
+// A handoff proposal: a Bot asks, with a card in its chat, to pass a link on: to a coding thread for
+// one of the user's projects, or to another Bot's chat. The gateway keeps the proposal; the chat
+// only knows its id (from the Bot's handoff_propose call) and reads everything it shows from the gateway.
 
 export type HandoffStatus = "pending" | "launching" | "launched" | "rejected" | "expired" | "invalid" | "failed";
 export type HandoffProposal = {
@@ -11,16 +11,23 @@ export type HandoffProposal = {
   botSlug: string;
   botName: string;
   threadId: string;
-  projectId: string;
-  projectTitle: string;
-  projectPath: string;
+  /** "project": a coding thread in the evaluator folder; "bot": a message in another Bot's chat. */
+  targetType: "project" | "bot";
+  projectId?: string;
+  projectTitle?: string;
+  projectPath?: string;
+  /** A Bot target: its slug and name, as stored when the Bot proposed. */
+  targetBotSlug?: string;
+  targetBotName?: string;
+  /** A Bot target: the conversation the message went to. */
+  sentToThreadId?: string;
   /** The commit the proposal fixed; the thread reads a read-only copy of it at snapshotPath. */
   commit?: string;
   snapshotPath?: string;
   kind: string;
   kindLabel: string;
   url: string;
-  /** The launched thread's title and first message, exactly as the gateway will send them. */
+  /** The launched thread's title and first message (a Bot target's message), exactly as the gateway will send them. */
   title: string;
   prompt: string;
   status: HandoffStatus;
@@ -98,4 +105,20 @@ export function handoffUrlWarning(url: string): string | null {
   if (!long && !query) return null;
   const parts = [long ? `is ${url.length} characters long` : "", query ? "has a query string (the part after ?)" : ""].filter(Boolean);
   return `Check the link before approving: it ${parts.join(" and ")}, which can carry text the thread will read.`;
+}
+
+/** A Bot target's name as stored, else its slug. */
+export function handoffBotName(proposal: Pick<HandoffProposal, "targetBotName" | "targetBotSlug">): string {
+  return proposal.targetBotName || proposal.targetBotSlug || "the other Bot";
+}
+
+/**
+ * Where a Bot target's message goes and how it is handled, in words. There is no evaluator: the
+ * card says plainly that the other Bot reads it in its own chat with its own permissions.
+ */
+export function handoffBotRuns(name: string): { runsIn: string; runsAs: string } {
+  return {
+    runsIn: `${name}'s own chat (its main conversation)`,
+    runsAs: `${name} itself, with its own permissions: no isolated evaluator and no read-only copy. Approving is the same as pasting this link into ${name}'s chat yourself`,
+  };
 }

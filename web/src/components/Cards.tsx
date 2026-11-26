@@ -13,7 +13,7 @@ import type { Entry } from "../lib/transcript";
 import type { Bot } from "../lib/types";
 import { approvalDecision, approvalOptions, questionAnswers, requestQuestions, requestStatus, secretLink, secretStatus, type ApprovalDecision, type QuestionAnswers } from "../lib/runtimeRequests";
 import { finishQuestionDraft, questionDraft } from "../lib/questionDrafts";
-import { handoffApi, handoffRunsAs, handoffRunsIn, handoffStatusLabel, handoffUrlWarning, type HandoffProposal } from "../lib/handoffs";
+import { handoffApi, handoffBotName, handoffBotRuns, handoffRunsAs, handoffRunsIn, handoffStatusLabel, handoffUrlWarning, type HandoffProposal } from "../lib/handoffs";
 import { withBotPageCsp } from "../lib/botPageCsp";
 import "./RequestCards.css";
 import "./AutomatedCard.css";
@@ -353,9 +353,10 @@ function SecretRequestCard({ entry, threadId }: SecretProps) {
 
 // ---------- subagent ----------
 // ---------- handoff ----------
-// A Bot's proposal to start a coding thread in one of the user's projects. Everything shown comes
-// from the gateway's stored proposal, never from the Bot's message: the prompt on the card is the
-// text Approve sends, byte for byte. A proposal made in another conversation is not shown here.
+// A Bot's proposal to pass a link on: a coding thread for one of the user's projects, or a message
+// in another Bot's chat. Everything shown comes from the gateway's stored proposal, never from the
+// Bot's message: the prompt on the card is the text Approve sends, byte for byte. A proposal made in
+// another conversation is not shown here.
 type HandoffProps = { entry: Extract<Entry, { kind: "handoff" }>; bot: Bot; threadId: string };
 export function HandoffCard(props: HandoffProps) {
   return <HandoffProposalCard key={`${props.bot.slug}:${props.threadId}:${props.entry.proposalId}`} {...props} />;
@@ -370,6 +371,8 @@ function HandoffProposalCard({ entry, bot, threadId }: HandoffProps) {
   const pending = proposal?.status === "pending";
   const launching = proposal?.status === "launching";
   const open = pending || launching;
+  const toBot = proposal?.targetType === "bot";
+  const targetBot = useApp((state) => toBot && proposal?.targetBotSlug ? state.bots[proposal.targetBotSlug] : undefined);
 
   // Another device may answer the card, and T3 may confirm a launch, so an open one is read again every few seconds.
   useEffect(() => {
@@ -400,36 +403,48 @@ function HandoffProposalCard({ entry, bot, threadId }: HandoffProps) {
     }
   };
 
+  const cardTitle = toBot ? "Hand off to a Bot" : "Hand off to a project";
   if (missing || (proposal && proposal.threadId !== threadId)) {
-    return <CardShell><CardHeader icon={<Send size={14} />} title="Hand off to a project" status="Unavailable" />
+    return <CardShell><CardHeader icon={<Send size={14} />} title={cardTitle} status="Unavailable" />
       <div className="rounded-[13px] bg-card-inner px-3.5 py-3 text-[13px] text-muted">This proposal is no longer kept.</div></CardShell>;
   }
   if (!proposal) {
-    return <CardShell><CardHeader icon={<Send size={14} />} title="Hand off to a project" status={<Spinner />} /></CardShell>;
+    return <CardShell><CardHeader icon={<Send size={14} />} title="Hand off" status={<Spinner />} /></CardShell>;
   }
   const urlWarning = handoffUrlWarning(proposal.url);
+  const botName = handoffBotName(proposal);
+  const botRuns = handoffBotRuns(botName);
   return (
     <CardShell>
-      <CardHeader icon={<Send size={14} />} title="Hand off to a project" status={handoffStatusLabel(proposal.status)} />
+      <CardHeader icon={<Send size={14} />} title={cardTitle} status={handoffStatusLabel(proposal.status)} />
       <div className="rounded-[13px] bg-card-inner px-3.5 py-3">
-        <div className="text-[14px]">{proposal.botName} proposes a new thread: {proposal.kindLabel}</div>
+        <div className="text-[14px]">{toBot ? `${proposal.botName} proposes a message to another Bot: ${proposal.kindLabel}` : `${proposal.botName} proposes a new thread: ${proposal.kindLabel}`}</div>
         <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-[13px]">
-          <dt className="text-muted">Project</dt>
-          <dd><span>{proposal.projectTitle}</span> <span className="break-all text-muted">{proposal.projectPath}</span></dd>
+          {toBot ? <>
+            <dt className="handoff-target-label text-muted">Bot</dt>
+            <dd><span>{botName}</span> <span className="break-all text-muted">{proposal.targetBotSlug}</span></dd>
+          </> : <>
+            <dt className="handoff-target-label text-muted">Project</dt>
+            <dd><span>{proposal.projectTitle}</span> <span className="break-all text-muted">{proposal.projectPath}</span></dd>
+          </>}
           <dt className="text-muted">Link</dt>
           <dd><a className="break-all underline underline-offset-2" href={proposal.url} target="_blank" rel="noopener noreferrer">{proposal.url}</a></dd>
           <dt className="text-muted">Runs in</dt>
-          <dd className="break-all">{handoffRunsIn(proposal)}</dd>
+          <dd className="break-all">{toBot ? botRuns.runsIn : handoffRunsIn(proposal)}</dd>
           <dt className="text-muted">Runs as</dt>
-          <dd>{handoffRunsAs(proposal.launchSettings)}</dd>
+          <dd>{toBot ? botRuns.runsAs : handoffRunsAs(proposal.launchSettings)}</dd>
         </dl>
         {urlWarning && <div className="handoff-url-warning mt-2 text-[12.5px] text-danger">{urlWarning}</div>}
-        <div className="mt-2.5 text-[12.5px] text-muted">The thread starts with exactly this message:</div>
+        <div className="mt-2.5 text-[12.5px] text-muted">{toBot ? `${botName}'s chat receives exactly this message:` : "The thread starts with exactly this message:"}</div>
         <pre className="mt-1 rounded-lg bg-active px-3 py-2 font-mono text-[12px] whitespace-pre-wrap" style={{ overflowWrap: "anywhere" }}>{proposal.prompt}</pre>
-        {pending && proposal.lastError && !error && <div className="mt-2 text-[12.5px] text-danger">The last try did not start: {proposal.lastError}</div>}
-        {launching && <div className="mt-2 text-[12.5px] text-muted">Approved, and T3 has not confirmed the thread yet: it may already have started. Threebot keeps checking T3; it can't be rejected meanwhile. If it never appears, mark it as failed; a thread from this approval may still show up in T3 afterwards.</div>}
-        {proposal.status === "failed" && <div className="mt-2 text-[12.5px] text-muted">You marked this launch as failed when T3 had no thread for it. A thread from this approval may still show up in T3.</div>}
-        {proposal.status === "invalid" && <div className="mt-2 text-[12.5px] text-danger">This can no longer be approved: {proposal.invalidReason ?? "the project changed"}.</div>}
+        {pending && proposal.lastError && !error && <div className="mt-2 text-[12.5px] text-danger">{toBot ? "The last try was not sent" : "The last try did not start"}: {proposal.lastError}</div>}
+        {launching && <div className="mt-2 text-[12.5px] text-muted">{toBot
+          ? `Approved, and T3 has not confirmed the message yet: it may already be in ${botName}'s chat. Threebot keeps checking T3; it can't be rejected meanwhile. If it never arrives, mark it as failed; the message from this approval may still show up afterwards.`
+          : "Approved, and T3 has not confirmed the thread yet: it may already have started. Threebot keeps checking T3; it can't be rejected meanwhile. If it never appears, mark it as failed; a thread from this approval may still show up in T3 afterwards."}</div>}
+        {proposal.status === "failed" && <div className="mt-2 text-[12.5px] text-muted">{toBot
+          ? `You marked this message as failed when T3 did not have it. The message from this approval may still show up in ${botName}'s chat.`
+          : "You marked this launch as failed when T3 had no thread for it. A thread from this approval may still show up in T3."}</div>}
+        {proposal.status === "invalid" && <div className="mt-2 text-[12.5px] text-danger">This can no longer be approved: {proposal.invalidReason ?? (toBot ? "the Bot changed" : "the project changed")}.</div>}
       </div>
       {pending && (
         <div className="flex flex-wrap gap-2 px-1.5 pt-2 pb-1">
@@ -443,7 +458,13 @@ function HandoffProposalCard({ entry, bot, threadId }: HandoffProps) {
           <div className="ml-auto"><Pill variant="ghost" onClick={() => act("fail")} disabled={busy !== null}>{busy === "fail" ? "Checking…" : "Mark as failed"}</Pill></div>
         </div>
       )}
-      {proposal.status === "launched" && proposal.launchedThreadId && (
+      {proposal.status === "launched" && toBot && (
+        <div className="flex flex-wrap items-center gap-2 px-1.5 pt-2 pb-1">
+          {targetBot && proposal.launchedThreadId && <Pill variant="soft" onClick={() => selectThread(targetBot, proposal.launchedThreadId!)}>Open {botName}'s chat</Pill>}
+          <span className="text-[12.5px] text-muted">Sent to {botName}'s chat.</span>
+        </div>
+      )}
+      {proposal.status === "launched" && !toBot && proposal.launchedThreadId && (
         <div className="flex flex-wrap items-center gap-2 px-1.5 pt-2 pb-1">
           <Pill variant="soft" onClick={() => selectThread(bot, proposal.launchedThreadId!)}>Open thread</Pill>
           <span className="text-[12.5px] text-muted">Started for {proposal.projectTitle} as “{proposal.title}”.</span>
