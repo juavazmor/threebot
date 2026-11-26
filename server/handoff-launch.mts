@@ -36,13 +36,14 @@ export function t3Refused(error: unknown): boolean {
   return reasons.length > 0 && reasons.every((reason) => (reason as { _tag?: unknown } | null)?._tag === "Fail");
 }
 
-/** Deny rules the evaluator's settings must hold: no file changes, no Bot tools, no messaging other threads. */
-export const EVALUATOR_DENY = ["Edit", "Write", "mcp__bot__*", "mcp__t3-code__t3_thread_send"] as const;
+/** Deny rules the evaluator's settings must hold: no shell, no file changes, no Bot tools, no messaging other threads. */
+export const EVALUATOR_DENY = ["Bash", "Edit", "Write", "mcp__bot__*", "mcp__t3-code__t3_thread_send"] as const;
 
 /**
  * What the evaluator's .claude/settings.json is missing to count as hardened, given its text: the
- * OS sandbox on and required, no unsandboxed commands, the deny rules and no bypass mode. Empty when
- * nothing is missing.
+ * OS sandbox on and required with the home folder unreadable, no unsandboxed commands, reads kept to
+ * its own folder, no hooks, the deny rules, no bypass mode, and nothing that widens any of it (allow
+ * rules, extra folders, read exceptions). Empty when nothing is missing.
  */
 export function evaluatorSettingsGaps(text: string): string[] {
   let settings: unknown;
@@ -51,12 +52,22 @@ export function evaluatorSettingsGaps(text: string): string[] {
   const sandbox = object(object(settings).sandbox);
   const permissions = object(object(settings).permissions);
   const deny = Array.isArray(permissions.deny) ? permissions.deny : [];
+  const filesystem = object(sandbox.filesystem);
+  const denyRead = Array.isArray(filesystem.denyRead) ? filesystem.denyRead : [];
+  // Absent or an empty list: anything else could open what the rest closes.
+  const empty = (value: unknown) => value === undefined || (Array.isArray(value) && value.length === 0);
   return [
     sandbox.enabled === true ? "" : "sandbox.enabled: true",
     sandbox.failIfUnavailable === true ? "" : "sandbox.failIfUnavailable: true",
     sandbox.allowUnsandboxedCommands === false ? "" : "sandbox.allowUnsandboxedCommands: false",
     ...EVALUATOR_DENY.map((rule) => deny.includes(rule) ? "" : `permissions.deny "${rule}"`),
     permissions.disableBypassPermissionsMode === "disable" ? "" : `permissions.disableBypassPermissionsMode: "disable"`,
+    permissions.blockReadsOutsideWorkingDirectories === true ? "" : "permissions.blockReadsOutsideWorkingDirectories: true",
+    object(settings).disableAllHooks === true ? "" : "disableAllHooks: true",
+    denyRead.includes("~/") ? "" : `sandbox.filesystem.denyRead "~/"`,
+    empty(permissions.allow) ? "" : "no permissions.allow rules",
+    empty(permissions.additionalDirectories) ? "" : "no permissions.additionalDirectories",
+    filesystem.allowRead === undefined ? "" : "no sandbox.filesystem.allowRead",
   ].filter(Boolean);
 }
 

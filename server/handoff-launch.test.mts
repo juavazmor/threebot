@@ -7,10 +7,11 @@ import { test, type TestContext } from "node:test";
 import { createHandoffs, type HandoffTarget } from "./handoff.mts";
 import { EVALUATOR_PROJECT_TITLE, createHandoffLauncher, evaluatorProblem, t3Refused, threadNotFound, type HandoffT3Project } from "./handoff-launch.mts";
 
-/** The evaluator settings handoffs require, and nothing more. */
+/** The evaluator settings handoffs require, and nothing more: the keys checked, as the real file holds them. */
 const HARDENED = {
-  sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false },
-  permissions: { deny: ["Edit", "Write", "mcp__bot__*", "mcp__t3-code__t3_thread_send"], disableBypassPermissionsMode: "disable" },
+  disableAllHooks: true,
+  sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, filesystem: { denyRead: ["~/", "~/.ssh"], denyWrite: ["~/.threebot/evaluator"] } },
+  permissions: { deny: ["Bash", "Edit", "Write", "mcp__bot__*", "mcp__t3-code__t3_thread_send"], disableBypassPermissionsMode: "disable", blockReadsOutsideWorkingDirectories: true },
 };
 
 const CLAUDE = { instanceId: "claudeAgent", model: "claude-opus-5-5" };
@@ -116,11 +117,21 @@ test("evaluator settings count only when they hold every hardening rule, and the
     ["[]", /sandbox\.enabled: true/],
     [{ ...HARDENED, sandbox: { ...HARDENED.sandbox, enabled: "true" } }, /needs sandbox\.enabled: true\.$/],
     [{ ...HARDENED, sandbox: { ...HARDENED.sandbox, failIfUnavailable: undefined } }, /needs sandbox\.failIfUnavailable: true\.$/],
-    [{ ...HARDENED, sandbox: { enabled: true, failIfUnavailable: true } }, /needs sandbox\.allowUnsandboxedCommands: false\.$/],
+    [{ ...HARDENED, sandbox: { ...HARDENED.sandbox, allowUnsandboxedCommands: undefined } }, /needs sandbox\.allowUnsandboxedCommands: false\.$/],
     [{ ...HARDENED, permissions: { ...HARDENED.permissions, deny: deny.filter((rule) => rule !== "mcp__bot__*") } }, /needs permissions\.deny "mcp__bot__\*"\.$/],
     [{ ...HARDENED, permissions: { ...HARDENED.permissions, deny: deny.filter((rule) => rule !== "mcp__t3-code__t3_thread_send") } }, /needs permissions\.deny "mcp__t3-code__t3_thread_send"\.$/],
     [{ ...HARDENED, permissions: { ...HARDENED.permissions, deny: "Edit Write mcp__bot__* mcp__t3-code__t3_thread_send" } }, /permissions\.deny "Edit"/],
-    [{ ...HARDENED, permissions: { deny } }, /needs permissions\.disableBypassPermissionsMode: "disable"\.$/],
+    [{ ...HARDENED, permissions: { ...HARDENED.permissions, disableBypassPermissionsMode: undefined } }, /needs permissions\.disableBypassPermissionsMode: "disable"\.$/],
+    // No shell, reads kept to its folder, no hooks, the home folder unreadable.
+    [{ ...HARDENED, permissions: { ...HARDENED.permissions, deny: deny.filter((rule) => rule !== "Bash") } }, /needs permissions\.deny "Bash"\.$/],
+    [{ ...HARDENED, permissions: { ...HARDENED.permissions, blockReadsOutsideWorkingDirectories: undefined } }, /needs permissions\.blockReadsOutsideWorkingDirectories: true\.$/],
+    [{ ...HARDENED, disableAllHooks: false }, /needs disableAllHooks: true\.$/],
+    [{ ...HARDENED, sandbox: { ...HARDENED.sandbox, filesystem: { denyRead: ["~/.ssh"] } } }, /needs sandbox\.filesystem\.denyRead "~\/"\.$/],
+    [{ ...HARDENED, sandbox: { ...HARDENED.sandbox, filesystem: undefined } }, /needs sandbox\.filesystem\.denyRead "~\/"\.$/],
+    // Nothing that widens it again.
+    [{ ...HARDENED, permissions: { ...HARDENED.permissions, allow: ["Bash(ls:*)"] } }, /needs no permissions\.allow rules\.$/],
+    [{ ...HARDENED, permissions: { ...HARDENED.permissions, additionalDirectories: ["/Users/someone/Developer"] } }, /needs no permissions\.additionalDirectories\.$/],
+    [{ ...HARDENED, sandbox: { ...HARDENED.sandbox, filesystem: { ...HARDENED.sandbox.filesystem, allowRead: [] } } }, /needs no sandbox\.filesystem\.allowRead\.$/],
   ];
   for (const [settings, message] of cases) {
     await write(settings);
