@@ -23,7 +23,7 @@ import { keepThreadsActive, settleQuietThreads } from "./auto-settle.mts";
 import { archivedBotIdentities } from "./bot-identities.mts";
 import { createConversationRoutes } from "./bot-conversations.mts";
 import { LoginExpired, createLoginLimiter, mayEnter, trustLocalProcesses } from "./auth-policy.mts";
-import { createHandoffs, type HandoffProposal, type HandoffTarget } from "./handoff.mts";
+import { createHandoffs, handoffTargetLabel, handoffTargetType, type HandoffProposal, type HandoffTarget } from "./handoff.mts";
 import { createHandoffLauncher } from "./handoff-launch.mts";
 import { createHandoffTools } from "./handoff-mcp.mts";
 import { createHandoffRoutes } from "./handoff-routes.mts";
@@ -1121,15 +1121,17 @@ async function resolveMcpAuth(raw: string): Promise<McpAuth | null> {
 }
 
 // ---------- Handoff proposals ----------
-// A Bot proposes work for a coding project, the user approves the exact message on a card, and the
-// gateway launches the thread in the evaluator folder. Who may propose where is in
-// handoff-allowlist.json, written by hand; the evaluator folder and its settings are made by hand too.
+// A Bot proposes passing a link on, to a coding project or to another Bot; the user approves the
+// exact message on a card, and the gateway launches the thread in the evaluator folder or posts the
+// message to the other Bot's main conversation. Who may propose where is in handoff-allowlist.json,
+// written by hand; the evaluator folder and its settings are made by hand too.
 const handoffLauncher = createHandoffLauncher({
   evaluatorDir: path.resolve(process.env.HANDOFF_EVALUATOR_DIR ?? path.join(dataRoot, "evaluator")),
   recordsDir: path.join(appDir, "handoff-snapshots"),
   rpc: roomRpc,
   projects: t3Projects,
   eligible: handoffTargets,
+  bots: listBots,
   models: async () => {
     const client = await withTimeout(t3rpc(), 10000, "T3 timed out");
     const [config, settings] = await Promise.all([withTimeout(client.call("server.getConfig", {}), 15000, "T3 timed out").catch(() => null), getSettings()]);
@@ -1154,7 +1156,7 @@ async function handoffPush(proposal: HandoffProposal, kind: "waiting" | "resolve
   const slug = encodeURIComponent(bot.slug);
   await pushStore.send({
     title: bot.name,
-    body: kind === "waiting" ? `Wants to hand a link to ${proposal.projectTitle}` : "Answered",
+    body: kind === "waiting" ? `Wants to hand a link to ${handoffTargetType(proposal) === "bot" ? "the Bot " : ""}${handoffTargetLabel(proposal)}` : "Answered",
     tag: `handoff:${bot.slug}:${proposal.id}`,
     url: `/?bot=${slug}&thread=${encodeURIComponent(proposal.threadId)}`,
     bot: bot.slug,
@@ -1165,7 +1167,6 @@ async function handoffPush(proposal: HandoffProposal, kind: "waiting" | "resolve
 }
 const handoffTools = createHandoffTools({
   handoffs,
-  projects: handoffLauncher.targets,
   onProposed: (proposal) => handoffPush(proposal, "waiting"),
   log: (line) => console.log(line),
 });

@@ -222,7 +222,7 @@ export function seedInteractions({ threads, items, stamp }: { threads: FixtureTh
   // A handoff proposal: the card's content comes from the gateway, by the id in the tool's output.
   message(HANDOFF_FIXTURE.threadId, 'assistant_message', 'I proposed handing that link to Sample app. The card below is waiting for you; nothing starts unless you approve it.');
   append(HANDOFF_FIXTURE.threadId, 'dynamic_tool', { id: 'fixture-handoff-propose', toolName: 'mcp__bot__handoff_propose',
-    input: { projectId: HANDOFF_FIXTURE.projectId, url: HANDOFF_FIXTURE.url, kind: HANDOFF_FIXTURE.kind, threadId: HANDOFF_FIXTURE.threadId },
+    input: { target: `project:${HANDOFF_FIXTURE.projectId}`, url: HANDOFF_FIXTURE.url, kind: HANDOFF_FIXTURE.kind, threadId: HANDOFF_FIXTURE.threadId },
     output: { content: [{ type: 'text', text: JSON.stringify({ proposed: true, proposalId: HANDOFF_FIXTURE.proposalId, status: 'waiting-for-user', alreadyWaiting: false }) }] } });
   const addSecret = (id: string, status = 'pending', threadId = 'thread-alpha') => {
     const item = append(threadId, 'secret_request', { id,

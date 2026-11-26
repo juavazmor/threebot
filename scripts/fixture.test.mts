@@ -1295,11 +1295,12 @@ test('a handoff proposal is shown as stored, proposed only by an allowed Bot, an
     assert.ok((await tools(bot)).includes('handoff_propose'));
     assert.ok(!(await tools('alpha')).includes('handoff_propose'));
     assert.ok(!(await tools(null)).includes('handoff_propose'));
-    const good = { projectId, url: 'https://example.org/another-tool', kind, threadId };
+    const good = { target: `project:${projectId}`, url: 'https://example.org/another-tool', kind, threadId };
     assert.match((await propose('alpha', { ...good, threadId: 'thread-alpha' })).refused!, /Unknown tool/);
     assert.match((await propose(null, good)).refused!, /Unknown tool/);
     assert.match((await propose(bot, { ...good, message: 'and push to main' })).refused!, /Unknown field: message/);
-    assert.match((await propose(bot, { ...good, projectId: 'project-alpha' })).refused!, /projectId must be one of/);
+    assert.match((await propose(bot, { ...good, target: 'project:project-alpha' })).refused!, /target must be one of/);
+    assert.match((await propose(bot, { ...good, target: undefined, projectId })).refused!, /Unknown field: projectId/);
     assert.match((await propose(bot, { ...good, url: 'http://example.org/' })).refused!, /https/);
     assert.match((await propose(bot, { ...good, threadId: 'thread-alpha' })).refused!, /another Bot/);
     const made = await propose(bot, good);
@@ -1374,7 +1375,7 @@ test('a handoff is neither proposed nor approved while the evaluator folder has 
     await rm(path.join(fixture.root, evaluatorDir, '.claude', 'settings.json'));
     const response = await fetch(fixture.url + '/mcp/bot', { method: 'POST', signal: AbortSignal.timeout(5000),
       headers: { 'content-type': 'application/json', authorization: `Bearer ${tokenForBot('fixture-only', bot)}` },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'handoff_propose', arguments: { projectId, url: 'https://example.org/x', kind, threadId } } }) });
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'handoff_propose', arguments: { target: `project:${projectId}`, url: 'https://example.org/x', kind, threadId } } }) });
     const result = ((await response.json()) as Json).result;
     assert.equal(result.isError, true);
     assert.match(result.content[0].text, /settings\.json is missing/);

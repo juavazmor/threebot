@@ -4,7 +4,7 @@ import { chmod, lstat, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
-import { createHandoffs, type HandoffTarget } from "./handoff.mts";
+import { createHandoffs, type HandoffBot, type HandoffTarget } from "./handoff.mts";
 import { EVALUATOR_PROJECT_TITLE, createHandoffLauncher, evaluatorProblem, t3Refused, threadNotFound, type HandoffT3Project } from "./handoff-launch.mts";
 
 /** The evaluator settings handoffs require, and nothing more: the keys checked, as the real file holds them. */
@@ -49,14 +49,21 @@ async function setup(t: TestContext, { settings = true }: { settings?: boolean }
   const evaluatorDir = path.join(dir, "evaluator");
   await mkdir(path.join(evaluatorDir, ".claude"), { recursive: true });
   if (settings) await writeFile(path.join(evaluatorDir, ".claude", "settings.json"), JSON.stringify(HARDENED));
+  const bots: HandoffBot[] = [
+    { slug: "reader", name: "Reader", environmentId: "local", mainThreadId: "thread-1" },
+    { slug: "writer", name: "Writer", environmentId: "local", mainThreadId: "thread-writer" },
+  ];
   const projects: HandoffT3Project[] = [
     { id: "project-app", title: "App", workspaceRoot: path.join(dir, "app"), defaultModelSelection: { instanceId: "codex", model: "gpt-6-sol" } },
     { id: "project-bot", title: "Reader", workspaceRoot: path.join(dir, "bots", "reader") },
   ];
   const calls: { tag: string; payload: any }[] = [];
-  const threads = new Set<string>();
+  const threads = new Set<string>(["thread-writer"]);
+  /** Message ids T3 holds per thread. */
+  const messages = new Map<string, string[]>();
   const t3 = {
     launch: async (_payload: any): Promise<unknown> => ({}),
+    dispatch: async (_payload: any): Promise<unknown> => ({}),
     threadAnswer: null as ((threadId: string) => Promise<unknown>) | null,
     /** T3 can't list its projects: a launch fails before anything is sent. */
     projectsDown: false,
@@ -70,10 +77,16 @@ async function setup(t: TestContext, { settings = true }: { settings?: boolean }
         return {};
       }
       if (tag === "orchestration.launchThread") { const answer = await t3.launch(payload); threads.add(payload.threadId); return answer; }
+      if (tag === "orchestration.dispatchCommand" && payload.type === "message.dispatch") {
+        const answer = await t3.dispatch(payload);
+        if (!threads.has(payload.threadId)) throw t3Failure("Unknown thread");
+        (messages.get(payload.threadId) ?? messages.set(payload.threadId, []).get(payload.threadId)!).push(payload.messageId);
+        return answer;
+      }
       if (tag === "orchestration.getThreadProjection") {
         if (t3.threadAnswer) return t3.threadAnswer(payload.threadId);
         if (!threads.has(payload.threadId)) throw t3NoThread(payload.threadId);
-        return { thread: { id: payload.threadId } };
+        return { thread: { id: payload.threadId }, messages: (messages.get(payload.threadId) ?? []).map((id) => ({ id, role: "user" })), turnItems: [] };
       }
       throw new Error(`unexpected ${tag}`);
     },
@@ -84,14 +97,14 @@ async function setup(t: TestContext, { settings = true }: { settings?: boolean }
     .map((project) => ({ projectId: project.id, title: project.title ?? project.id, path: project.workspaceRoot! }));
   const launcher = createHandoffLauncher({
     evaluatorDir, recordsDir: path.join(dir, "handoff-snapshots"), rpc, projects: async () => { if (t3.projectsDown) throw new Error("T3 timed out"); return projects.filter((project) => !project.deletedAt); }, eligible,
+    bots: async () => bots,
     models: async () => ({ providers: [{ instanceId: "claudeAgent", driver: "claudeAgent" }, { instanceId: "codex", driver: "codex" }], appDefault: CLAUDE, fallback: CLAUDE }),
   });
   const allowlistFile = path.join(dir, "handoff-allowlist.json");
-  await writeFile(allowlistFile, JSON.stringify({ reader: { projects: ["project-app"] } }));
+  await writeFile(allowlistFile, JSON.stringify({ reader: { projects: ["project-app"], bots: ["writer"] } }));
   const handoffs = createHandoffs({ file: path.join(dir, "handoffs.json"), allowlistFile, launcher });
-  const target = (await eligible())[0];
-  const propose = (url = "https://example.com/tool") => handoffs.propose({ bot: { slug: "reader", name: "Reader" }, threadId: "thread-1", project: target, kind: "evaluate-fit", url });
-  return { dir, evaluatorDir, projects, calls, t3, launcher, handoffs, propose, eligible };
+  const propose = (url = "https://example.com/tool", target = "project:project-app") => handoffs.propose({ bot: { slug: "reader", name: "Reader" }, threadId: "thread-1", target, kind: "evaluate-fit", url });
+  return { dir, evaluatorDir, projects, bots, calls, t3, launcher, handoffs, propose, eligible, threads, messages };
 }
 
 test("the evaluator folder counts only with its .claude/settings.json", async (t) => {
@@ -196,7 +209,7 @@ test("an approved handoff runs in the evaluator's project, made once when T3 has
   }
   assert.equal(launches.find((launch) => launch.threadId === first.launch.threadId).initialMessage.text, first.prompt);
   // Each approved thread's copy exists, with the project's tracked file.
-  for (const proposal of [first, second]) assert.deepEqual(await readdir(proposal.snapshotPath), ["README.md"]);
+  for (const proposal of [first, second]) assert.deepEqual(await readdir(proposal.snapshotPath!), ["README.md"]);
 });
 
 test("an existing evaluator project is found by its folder, and archived ones are not used", async (t) => {
@@ -214,7 +227,7 @@ test("the evaluator's project is never a handoff target", async (t) => {
   projects.push({ id: "project-evaluator", title: EVALUATOR_PROJECT_TITLE, workspaceRoot: evaluatorDir });
   projects.push({ id: "project-inside", workspaceRoot: path.join(evaluatorDir, "nested") });
   assert.ok((await eligible()).some((target) => target.projectId === "project-evaluator"));
-  assert.deepEqual((await launcher.targets()).map((target) => target.projectId), ["project-app"]);
+  assert.deepEqual((await launcher.projectTargets()).map((target) => target.projectId), ["project-app"]);
   const proposal = { projectId: "project-evaluator", projectPath: evaluatorDir } as never;
   assert.match((await launcher.invalidTarget(proposal))!, /no longer one a handoff may target/);
 });
@@ -307,11 +320,52 @@ test("only T3's own no-such-thread answer, by its structure, counts as a thread 
 });
 
 test("a target folder that is not a git repo with a commit gets no proposal", async (t) => {
-  const { handoffs, dir } = await setup(t);
+  const { propose, handoffs, dir, projects } = await setup(t);
   const plain = path.join(dir, "plain");
   await mkdir(plain);
-  await assert.rejects(handoffs.propose({ bot: { slug: "reader", name: "Reader" }, threadId: "thread-1", project: { projectId: "project-app", title: "App", path: plain }, kind: "evaluate-fit", url: "https://example.com/tool" }),
-    { status: 400, message: /not a git repository with a commit/ });
+  projects[0].workspaceRoot = plain;
+  await assert.rejects(propose(), { status: 400, message: /not a git repository with a commit/ });
   assert.deepEqual(await handoffs.list("reader"), []);
   assert.deepEqual(await readdir(dir).then((names) => names.includes("evaluator") ? readdir(path.join(dir, "evaluator")) : []), [".claude"]);
+});
+
+test("approving a Bot target posts the stored message to its main conversation, and it counts as arrived by its id", async (t) => {
+  const { handoffs, propose, calls, messages, evaluatorDir } = await setup(t, { settings: false });
+  // No evaluator, no git: a Bot target needs neither.
+  const { proposal } = await propose("https://example.com/tool", "bot:writer");
+  const approved = await handoffs.approve("reader", proposal.id);
+  assert.equal(approved.status, "launched");
+  assert.equal(approved.launchedThreadId, "thread-writer");
+  const sent = calls.filter((call) => call.tag === "orchestration.dispatchCommand");
+  assert.deepEqual(sent.map((call) => call.payload), [{
+    type: "message.dispatch", commandId: proposal.launch.commandId, threadId: "thread-writer", messageId: proposal.launch.messageId,
+    text: proposal.prompt, attachments: [], createdBy: "agent", creationSource: "server", dispatchMode: { type: "queue_after_active" },
+  }]);
+  assert.deepEqual(messages.get("thread-writer"), [proposal.launch.messageId]);
+  assert.equal(calls.some((call) => call.tag === "orchestration.launchThread" || call.tag === "projects.mutate"), false);
+  assert.deepEqual(await readdir(evaluatorDir), [".claude"]);
+});
+
+test("a message T3 never confirmed is checked by its id in the conversation, and only T3's own refusal sends it back", async (t) => {
+  const { handoffs, propose, t3, launcher, messages } = await setup(t);
+  const dropped = (await propose("https://example.com/dropped", "bot:writer")).proposal;
+  t3.dispatch = async () => { throw new Error("socket closed 1006"); };
+  await assert.rejects(handoffs.approve("reader", dropped.id), { status: 504 });
+  const launching = await handoffs.get("reader", dropped.id);
+  assert.equal(launching.status, "launching");
+  assert.equal(launching.sentToThreadId, "thread-writer");
+  assert.equal(await launcher.arrived(launching), false);
+  // T3 can't say: unknown, not missing.
+  t3.threadAnswer = async () => { throw new Error("socket closed"); };
+  await assert.rejects(launcher.arrived(launching), /socket closed/);
+  t3.threadAnswer = null;
+  // The conversation is gone: the message is not there.
+  assert.equal(await launcher.arrived({ ...launching, sentToThreadId: "thread-gone" }), false);
+  messages.set("thread-writer", [launching.launch.messageId!]);
+  assert.equal((await handoffs.get("reader", dropped.id)).status, "launched");
+
+  const refused = (await propose("https://example.com/refused", "bot:writer")).proposal;
+  t3.dispatch = async () => { throw t3Failure("Thread is archived"); };
+  await assert.rejects(handoffs.approve("reader", refused.id), { status: 502, message: /did not take the message/ });
+  assert.equal((await handoffs.get("reader", refused.id)).status, "pending");
 });

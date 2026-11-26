@@ -1,6 +1,7 @@
-// The gateway's side of launching an approved handoff: the evaluator folder every handoff thread
-// runs in and its T3 project, the target checked again at approval, and the questions that settle
-// a launch T3 did not confirm. handoff.mts keeps the state machine and asks through here.
+// The gateway's side of launching an approved handoff: the evaluator folder every project handoff's
+// thread runs in and its T3 project, the targets a handoff may reach (T3 projects, the gateway's
+// Bots), the target checked again at approval, the message a Bot target receives, and the questions
+// that settle a launch T3 did not confirm. handoff.mts keeps the state machine and asks through here.
 //   - The evaluator folder is made and hardened by hand (its .claude/settings.json holds the OS
 //     sandbox and deny rules); without both, and without each rule evaluatorSettingsGaps checks,
 //     handoffs are refused rather than run unhardened.
@@ -10,7 +11,10 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { samePath, within } from "./adopted-bots.mts";
-import { launchHandoffThread, pickHandoffModel, type HandoffLauncher, type HandoffProposal, type HandoffRpc, type HandoffTarget } from "./handoff.mts";
+import {
+  handoffTargetType, launchHandoffThread, pickHandoffModel, projectionHasMessage, sendHandoffMessage,
+  type HandoffBot, type HandoffLauncher, type HandoffProposal, type HandoffRpc, type HandoffTarget,
+} from "./handoff.mts";
 import { SnapshotError, ensureSnapshot, resolveCommit, snapshotPath, sweepSnapshots } from "./handoff-snapshot.mts";
 
 export const EVALUATOR_PROJECT_TITLE = "Handoff evaluator";
@@ -109,7 +113,7 @@ export function threadNotFound(error: unknown): boolean {
 /** `sent`: T3 itself answered the launch with a failure; false when the launch was never sent. */
 const refused = (error: unknown, sent: boolean) => Object.assign(error instanceof Error ? error : new Error(String(error)), { refused: true, sent });
 
-export function createHandoffLauncher({ evaluatorDir, recordsDir, rpc, projects, eligible, models }: {
+export function createHandoffLauncher({ evaluatorDir, recordsDir, rpc, projects, eligible, bots, models }: {
   /** Absolute; HANDOFF_EVALUATOR_DIR. */
   evaluatorDir: string;
   /** Where the snapshots' records are kept, outside the evaluator folder: <appDir>/handoff-snapshots. */
@@ -119,9 +123,11 @@ export function createHandoffLauncher({ evaluatorDir, recordsDir, rpc, projects,
   projects: () => Promise<HandoffT3Project[]>;
   /** T3 projects a handoff may target before the evaluator is taken out: live, not a Bot. */
   eligible: () => Promise<HandoffTarget[]>;
+  /** The gateway's Bot registry (Bots in the Bots folder and adopted ones). */
+  bots: () => Promise<HandoffBot[]>;
   /** T3's providers and the app's default model, for pickHandoffModel; `fallback` is Claude. */
   models: () => Promise<{ providers: unknown; appDefault: unknown; fallback: unknown }>;
-}): HandoffLauncher & { targets: () => Promise<HandoffTarget[]> } {
+}): HandoffLauncher & { threadExists: (threadId: string) => Promise<boolean> } {
   const isEvaluator = (folder: string) => within(evaluatorDir, folder);
   /** Eligible targets: never the evaluator's own folder or anything in it. */
   const targets = async () => (await eligible()).filter((target) => !isEvaluator(target.path));
@@ -148,9 +154,20 @@ export function createHandoffLauncher({ evaluatorDir, recordsDir, rpc, projects,
     return result;
   }
 
+  async function threadExists(threadId: string) {
+    try {
+      return Boolean(await timed(rpc.call("orchestration.getThreadProjection", { threadId }), QUERY_MS, "T3 timed out"));
+    } catch (error) {
+      // Only T3 saying it has no such thread counts as "no"; any other failure leaves it unknown.
+      if (t3Refused(error) && threadNotFound(error)) return false;
+      throw error;
+    }
+  }
+
   return {
     evaluatorDir,
-    targets,
+    projectTargets: targets,
+    bots,
     unavailable: () => evaluatorProblem(evaluatorDir),
 
     async invalidTarget(proposal: HandoffProposal) {
@@ -160,11 +177,20 @@ export function createHandoffLauncher({ evaluatorDir, recordsDir, rpc, projects,
       if (project.archivedAt) return "the project was archived in T3";
       const target = current.find((candidate) => candidate.projectId === proposal.projectId);
       if (!target) return "the project is no longer one a handoff may target";
-      if (!samePath(target.path, proposal.projectPath)) return "the project's folder changed since the proposal";
+      if (!proposal.projectPath || !samePath(target.path, proposal.projectPath)) return "the project's folder changed since the proposal";
       return null;
     },
 
     async launch(proposal: HandoffProposal) {
+      if (handoffTargetType(proposal) === "bot") {
+        if (!proposal.sentToThreadId || !proposal.launch.messageId) throw refused(new Error("the proposal has no conversation to send to"), false);
+        try {
+          await timed(sendHandoffMessage({ rpc, proposal }), LAUNCH_MS, "T3 timed out");
+        } catch (error) {
+          throw t3Refused(error) ? refused(error, true) : error;
+        }
+        return;
+      }
       let projectId: string;
       let modelSelection: unknown;
       // Everything before the launch call itself can fail without a thread existing.
@@ -183,25 +209,28 @@ export function createHandoffLauncher({ evaluatorDir, recordsDir, rpc, projects,
       }
     },
 
+    async arrived(proposal: HandoffProposal) {
+      if (handoffTargetType(proposal) === "project") return threadExists(proposal.launch.threadId ?? "");
+      if (!proposal.sentToThreadId) return false;
+      try {
+        return projectionHasMessage(await timed(rpc.call("orchestration.getThreadProjection", { threadId: proposal.sentToThreadId }), QUERY_MS, "T3 timed out"), proposal.launch.messageId);
+      } catch (error) {
+        // The conversation is gone: the message is not there. Any other failure leaves it unknown.
+        if (t3Refused(error) && threadNotFound(error)) return false;
+        throw error;
+      }
+    },
+
     commitOf: (projectPath: string) => resolveCommit(projectPath),
     snapshotPath: (proposalId: string) => snapshotPath(evaluatorDir, proposalId),
     async prepareSnapshot(proposal: HandoffProposal) {
       try {
-        await ensureSnapshot({ evaluatorDir, recordsDir, proposalId: proposal.id, projectId: proposal.projectId, projectPath: proposal.projectPath, commit: proposal.commit });
+        await ensureSnapshot({ evaluatorDir, recordsDir, proposalId: proposal.id, projectId: proposal.projectId ?? "", projectPath: proposal.projectPath ?? "", commit: proposal.commit ?? "" });
       } catch (error) {
         throw Object.assign(error instanceof Error ? error : new Error(String(error)), { invalid: error instanceof SnapshotError && error.invalid });
       }
     },
     sweepSnapshots: (proposals: HandoffProposal[]) => sweepSnapshots({ evaluatorDir, recordsDir, proposals }),
-
-    async threadExists(threadId: string) {
-      try {
-        return Boolean(await timed(rpc.call("orchestration.getThreadProjection", { threadId }), QUERY_MS, "T3 timed out"));
-      } catch (error) {
-        // Only T3 saying it has no such thread counts as "no"; any other failure leaves it unknown.
-        if (t3Refused(error) && threadNotFound(error)) return false;
-        throw error;
-      }
-    },
+    threadExists,
   };
 }
