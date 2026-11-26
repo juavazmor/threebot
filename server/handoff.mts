@@ -15,9 +15,13 @@ export type HandoffKind = (typeof HANDOFF_KINDS)[number];
 /**
  * pending: waiting for the user. launching: Approve sent the launch and T3 has not confirmed it, so
  * the thread may exist; it is reconciled through the stored ids and can't be rejected meanwhile.
+ * It leaves launching only when T3 has the thread (launched), when T3 answers the launch call itself
+ * with a failure (back to pending), or when the user marks it failed; never because time passed.
  * invalid: the target changed or left the eligible projects before approval; final.
+ * failed: the user marked an unconfirmed launch as failed while T3 had no thread; final, though a
+ * thread T3 was still creating may yet appear.
  */
-export type HandoffStatus = "pending" | "launching" | "launched" | "rejected" | "expired" | "invalid";
+export type HandoffStatus = "pending" | "launching" | "launched" | "rejected" | "expired" | "invalid" | "failed";
 
 /**
  * How an approved handoff's thread runs: the most contained combination T3 offers (checked on
@@ -223,8 +227,6 @@ export const HANDOFF_LIMITS = {
   pendingDays: 7,
   /** Proposals kept in the file beyond the last day; waiting ones and the last day's are never dropped. */
   kept: 200,
-  /** How long after the last launch attempt a thread T3 doesn't have counts as not started. */
-  launchSettleMs: 120_000,
 };
 export type HandoffLimits = typeof HANDOFF_LIMITS;
 
@@ -268,6 +270,8 @@ export function createHandoffs({ file, allowlistFile, launcher = null, now = () 
   }
   /** Approvals in flight by (slug, id), so a second tap waits for the first instead of launching again. */
   const inFlight = new Map<string, Promise<HandoffProposal>>();
+  /** "Mark as failed" in flight by (slug, id): no approval starts meanwhile, and the reverse. */
+  const failing = new Set<string>();
   const key = (slug: string, id: string) => `${slug}\n${id}`;
 
   async function load(): Promise<HandoffState> {
@@ -334,26 +338,16 @@ export function createHandoffs({ file, allowlistFile, launcher = null, now = () 
     delete current.launchingAt;
   });
 
-  const settled = (proposal: HandoffProposal) =>
-    now().getTime() - Date.parse(proposal.launchingAt ?? proposal.createdAt) >= limits.launchSettleMs;
-
   /**
    * A launching proposal checked against T3 by its stored thread id: launched when T3 has the
-   * thread; back to pending only when T3 says it doesn't and the last attempt is old enough that
-   * T3 can't still be creating it. When T3 can't say, it stays launching.
+   * thread. Anything else (T3 says it has none, or can't say) leaves it launching: a thread T3 has
+   * not shown yet may still appear, so only the user decides it failed.
    */
   async function reconcile(proposal: HandoffProposal): Promise<HandoffProposal> {
     if (proposal.status !== "launching" || !launcher || inFlight.has(key(proposal.botSlug, proposal.id))) return proposal;
     let exists: boolean;
     try { exists = await launcher.threadExists(proposal.launch.threadId); } catch { return proposal; }
-    if (exists) return markLaunched(proposal.botSlug, proposal.id);
-    if (!settled(proposal)) return proposal;
-    return update(proposal.botSlug, proposal.id, (current) => {
-      if (current.status !== "launching" || current.launchingAt !== proposal.launchingAt) return;
-      current.status = "pending";
-      current.lastError = "T3 has no thread for the last approval, so it did not start.";
-      delete current.launchingAt;
-    });
+    return exists ? markLaunched(proposal.botSlug, proposal.id) : proposal;
   }
 
   async function approveNow(slug: string, id: string): Promise<HandoffProposal> {
@@ -375,10 +369,10 @@ export function createHandoffs({ file, allowlistFile, launcher = null, now = () 
     try { invalid = await launcher.invalidTarget(proposal); }
     catch (error) { throw failure(`Couldn't check the project in T3: ${oneLine((error as Error)?.message ?? error, 300)}`, 502); }
     if (invalid) {
-      // A launch that may still be in T3's hands is not declared dead until it has settled.
-      if (proposal.status === "launching" && !settled(proposal)) throw failure("T3 is still being checked for the last approval. Try again in a moment.", 409);
+      // A launch that may still be in T3's hands is never declared dead here: it stays launching.
+      if (proposal.status === "launching") throw failure(`The last approval can't be sent again: ${invalid}. T3 may still start the thread from the earlier try; mark it as failed if it never appears.`, 409);
       await update(slug, id, (current) => {
-        if (!waiting(current)) return;
+        if (current.status !== "pending") return;
         current.status = "invalid";
         current.invalidReason = oneLine(invalid, 200);
         current.decidedAt = now().toISOString();
@@ -490,6 +484,35 @@ export function createHandoffs({ file, allowlistFile, launcher = null, now = () 
     },
 
     /**
+     * The user's answer to a launch T3 never confirmed: T3 is asked first, so a thread it has makes
+     * the proposal launched instead; only when T3 says it has no such thread does it become failed.
+     */
+    async fail(slug: string, id: string): Promise<HandoffProposal> {
+      const k = key(slug, id);
+      if (inFlight.has(k) || failing.has(k)) throw failure("This proposal is being launched or checked. Try again in a moment.", 409);
+      failing.add(k);
+      try {
+        const proposal = await read(slug, id);
+        if (proposal.status === "failed") return proposal;
+        if (proposal.status !== "launching") throw failure(`Only a launch T3 has not confirmed can be marked as failed; this proposal is ${proposal.status}.`, 409);
+        if (!launcher) throw failure("Handoffs can't be checked here.", 503);
+        let exists: boolean;
+        try { exists = await launcher.threadExists(proposal.launch.threadId); }
+        catch (error) { throw failure(`Couldn't ask T3 about the thread: ${oneLine((error as Error)?.message ?? error, 300)}. Nothing was changed.`, 502); }
+        if (exists) return await markLaunched(slug, id);
+        return await update(slug, id, (current) => {
+          if (current.status === "failed") return;
+          if (current.status !== "launching") throw failure(`This proposal was already ${current.status}.`, 409);
+          current.status = "failed";
+          current.decidedAt = now().toISOString();
+          delete current.launchingAt;
+        });
+      } finally {
+        failing.delete(k);
+      }
+    },
+
+    /**
      * Launches the stored proposal and records it. Nothing about the proposal is recomputed: the
      * target is checked against T3's eligible projects and the stored folder, and the stored title
      * and prompt go out with the stored ids, so a retry re-sends the same command.
@@ -498,6 +521,7 @@ export function createHandoffs({ file, allowlistFile, launcher = null, now = () 
       const k = key(slug, id);
       const running = inFlight.get(k);
       if (running) return running;
+      if (failing.has(k)) return Promise.reject(failure("This proposal is being marked as failed.", 409));
       const run = approveNow(slug, id);
       inFlight.set(k, run);
       void run.catch(() => {}).finally(() => { if (inFlight.get(k) === run) inFlight.delete(k); });

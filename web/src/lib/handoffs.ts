@@ -5,7 +5,7 @@ import { resultObject } from "./botMessages";
 // user's projects. The gateway keeps the proposal; the chat only knows its id (from the Bot's
 // handoff_propose call) and reads everything it shows from the gateway.
 
-export type HandoffStatus = "pending" | "launching" | "launched" | "rejected" | "expired" | "invalid";
+export type HandoffStatus = "pending" | "launching" | "launched" | "rejected" | "expired" | "invalid" | "failed";
 export type HandoffProposal = {
   id: string;
   botSlug: string;
@@ -39,6 +39,8 @@ export const handoffApi = {
   get: (slug: string, id: string) => apiRequest<HandoffProposal>(base(slug, id), { cache: "no-store" }),
   approve: (slug: string, id: string) => apiRequest<HandoffProposal>(`${base(slug, id)}/approve`, { method: "POST", body: "{}" }),
   reject: (slug: string, id: string) => apiRequest<HandoffProposal>(`${base(slug, id)}/reject`, { method: "POST", body: "{}" }),
+  /** Only for a launch T3 has not confirmed; the gateway asks T3 first. */
+  fail: (slug: string, id: string) => apiRequest<HandoffProposal>(`${base(slug, id)}/fail`, { method: "POST", body: "{}" }),
 };
 
 /** The Bots' own MCP server's tool, as Claude and Codex name it; a same-named tool elsewhere is not it. */
@@ -62,6 +64,7 @@ export function handoffStatusLabel(status: HandoffStatus): string {
     case "launched": return "Approved";
     case "rejected": return "Rejected";
     case "invalid": return "No longer valid";
+    case "failed": return "Marked as failed";
     default: return "Expired";
   }
 }

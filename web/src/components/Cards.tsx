@@ -364,7 +364,7 @@ export function HandoffCard(props: HandoffProps) {
 function HandoffProposalCard({ entry, bot, threadId }: HandoffProps) {
   const [proposal, setProposal] = useState<HandoffProposal | null>(null);
   const [missing, setMissing] = useState(false);
-  const [busy, setBusy] = useState<"approve" | "reject" | null>(null);
+  const [busy, setBusy] = useState<"approve" | "reject" | "fail" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const locked = useRef(false);
   const pending = proposal?.status === "pending";
@@ -383,8 +383,8 @@ function HandoffProposalCard({ entry, bot, threadId }: HandoffProps) {
     return () => { alive = false; if (timer) clearInterval(timer); };
   }, [bot.slug, entry.proposalId, open, proposal === null]);
 
-  const act = async (action: "approve" | "reject") => {
-    if (!open || (action === "reject" && !pending) || locked.current) return;
+  const act = async (action: "approve" | "reject" | "fail") => {
+    if (!open || (action === "reject" && !pending) || (action === "fail" && !launching) || locked.current) return;
     locked.current = true;
     setBusy(action);
     setError(null);
@@ -427,7 +427,8 @@ function HandoffProposalCard({ entry, bot, threadId }: HandoffProps) {
         <div className="mt-2.5 text-[12.5px] text-muted">The thread starts with exactly this message:</div>
         <pre className="mt-1 rounded-lg bg-active px-3 py-2 font-mono text-[12px] whitespace-pre-wrap" style={{ overflowWrap: "anywhere" }}>{proposal.prompt}</pre>
         {pending && proposal.lastError && !error && <div className="mt-2 text-[12.5px] text-danger">The last try did not start: {proposal.lastError}</div>}
-        {launching && <div className="mt-2 text-[12.5px] text-muted">Approved, and T3 has not confirmed the thread yet: it may already have started. Threebot is checking T3; it can't be rejected meanwhile.</div>}
+        {launching && <div className="mt-2 text-[12.5px] text-muted">Approved, and T3 has not confirmed the thread yet: it may already have started. Threebot keeps checking T3; it can't be rejected meanwhile. If it never appears, mark it as failed; a thread from this approval may still show up in T3 afterwards.</div>}
+        {proposal.status === "failed" && <div className="mt-2 text-[12.5px] text-muted">You marked this launch as failed when T3 had no thread for it. A thread from this approval may still show up in T3.</div>}
         {proposal.status === "invalid" && <div className="mt-2 text-[12.5px] text-danger">This can no longer be approved: {proposal.invalidReason ?? "the project changed"}.</div>}
       </div>
       {pending && (
@@ -439,6 +440,7 @@ function HandoffProposalCard({ entry, bot, threadId }: HandoffProps) {
       {launching && (
         <div className="flex flex-wrap gap-2 px-1.5 pt-2 pb-1">
           <Pill variant="soft" onClick={() => act("approve")} disabled={busy !== null}>{busy === "approve" ? "Checking…" : "Retry approve"}</Pill>
+          <div className="ml-auto"><Pill variant="ghost" onClick={() => act("fail")} disabled={busy !== null}>{busy === "fail" ? "Checking…" : "Mark as failed"}</Pill></div>
         </div>
       )}
       {proposal.status === "launched" && proposal.launchedThreadId && (

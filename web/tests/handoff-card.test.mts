@@ -199,6 +199,33 @@ test("while T3 is being checked the card offers no Reject, says it may have star
   assert.equal(button("Reject"), undefined);
 });
 
+test("while T3 is being checked the card offers Mark as failed, which asks the gateway and shows the final state", async () => {
+  let failed = false;
+  answer = (path, method) => {
+    if (method === "POST") failed = true;
+    return { status: 200, body: failed ? stored({ status: "failed", decidedAt: "2026-11-26T10:05:00.000Z" }) : stored({ status: "launching", launchingAt: "2026-11-26T10:01:00.000Z" }) };
+  };
+  await render();
+  assert.match(host.textContent, /may still show up in T3/);
+  assert.ok(button("Retry approve"));
+  await click(button("Mark as failed"));
+  assert.deepEqual(requests.filter((request) => request.method === "POST"), [{ path: `/api/bots/reader/handoffs/${ID}/fail`, method: "POST" }]);
+  assert.match(host.textContent, /Marked as failed/);
+  assert.match(host.textContent, /may still show up in T3/);
+  assert.equal(host.querySelectorAll("button").length, 0);
+});
+
+test("Mark as failed shows the gateway's refusal and keeps the card launching", async () => {
+  answer = (path, method) => method === "POST"
+    ? { status: 502, body: { error: "Couldn't ask T3 about the thread: T3 timed out. Nothing was changed." } }
+    : { status: 200, body: stored({ status: "launching", launchingAt: "2026-11-26T10:01:00.000Z" }) };
+  await render();
+  await click(button("Mark as failed"));
+  assert.match(host.querySelector('[role="alert"]').textContent, /Nothing was changed/);
+  assert.ok(button("Mark as failed"));
+  assert.ok(button("Retry approve"));
+});
+
 test("an invalid proposal shows why and offers no buttons", async () => {
   answer = () => ({ status: 200, body: stored({ status: "invalid", invalidReason: "the project's folder changed since the proposal" }) });
   await render();

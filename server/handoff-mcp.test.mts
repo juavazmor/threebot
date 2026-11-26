@@ -22,11 +22,13 @@ async function setup(t: TestContext, allow: unknown = { reader: { projects: ["pr
   const allowlistFile = path.join(dir, "handoff-allowlist.json");
   await writeFile(allowlistFile, JSON.stringify(allow));
   const launched: HandoffProposal[] = [];
+  /** Set to make T3 drop the launch: the call is sent but no thread is made and no answer comes. */
+  const t3 = { drops: false };
   const launcher: HandoffLauncher = {
     evaluatorDir: "/evaluator",
     unavailable: async () => null,
     invalidTarget: async () => null,
-    launch: async (proposal) => { launched.push(proposal); },
+    launch: async (proposal) => { if (t3.drops) throw new Error("T3 timed out"); launched.push(proposal); },
     threadExists: async (threadId) => launched.some((proposal) => proposal.launch.threadId === threadId),
   };
   const handoffs = createHandoffs({ file: path.join(dir, "handoffs.json"), allowlistFile, launcher });
@@ -48,7 +50,7 @@ async function setup(t: TestContext, allow: unknown = { reader: { projects: ["pr
     return { error: result.isError ? result.content[0].text : null, isError: Boolean(result.isError), data: result.isError ? null : JSON.parse(result.content[0].text) };
   };
   const good = { projectId: "project-app", url: "https://example.com/tool", kind: "evaluate-fit", threadId: "thread-reader" };
-  return { handoffs, proposed, listed, call, good, allowlistFile, launched };
+  return { handoffs, proposed, listed, call, good, allowlistFile, launched, t3 };
 }
 
 test("only a Bot on the allowlist is shown the tool, with its own projects", async (t) => {
@@ -118,11 +120,11 @@ test("anything outside the closed fields is refused", async (t) => {
 type FakeRequest = { method: string; headers: IncomingHttpHeaders };
 type FakeResponse = { status: number; body: any };
 
-test("the app reads a proposal and answers it, and nothing can edit it", async (t) => {
-  const { call, good, handoffs, launched } = await setup(t);
+async function withRoutes(t: TestContext) {
+  const context = await setup(t);
   const decided: string[] = [];
   const routes = createHandoffRoutes<FakeRequest, FakeResponse>({
-    handoffs,
+    handoffs: context.handoffs,
     botExists: async (slug) => slug === "reader" || slug === "other",
     onDecided: (proposal) => { decided.push(`${proposal.id}:${proposal.status}`); },
     send: (res, status, body) => { res.status = status; res.body = body; },
@@ -134,6 +136,11 @@ test("the app reads a proposal and answers it, and nothing can edit it", async (
     const handled = await routes.handle({ method, headers }, res, new URL(pathname, "https://bot.example"));
     return { handled, ...res };
   };
+  return { ...context, decided, request };
+}
+
+test("the app reads a proposal and answers it, and nothing can edit it", async (t) => {
+  const { call, good, handoffs, launched, decided, request } = await withRoutes(t);
   const first = (await call(good)).data.proposalId as string;
   const second = (await call({ ...good, url: "https://example.org/other" })).data.proposalId as string;
   const base = `/api/bots/reader/handoffs`;
@@ -168,4 +175,25 @@ test("the app reads a proposal and answers it, and nothing can edit it", async (
   assert.equal((await request("POST", `${base}/${second}/approve`)).status, 409);
   assert.equal(launched.length, 1);
   assert.deepEqual(decided, [`${first}:launched`, `${second}:rejected`]);
+});
+
+test("the app marks a launch T3 never confirmed as failed, under the same rules as approving", async (t) => {
+  const { call, good, t3, decided, request } = await withRoutes(t);
+  const id = (await call(good)).data.proposalId as string;
+  const base = `/api/bots/reader/handoffs/${id}`;
+  // Not launching yet: refused.
+  assert.equal((await request("POST", `${base}/fail`)).status, 409);
+  t3.drops = true;
+  assert.equal((await request("POST", `${base}/approve`)).status, 504);
+  assert.equal((await request("GET", base)).body.status, "launching");
+  assert.equal((await request("POST", `${base}/fail`, { "content-type": "application/json", origin: "https://evil.example" })).status, 403);
+  assert.equal((await request("POST", `${base}/fail`, { origin: "https://bot.example" })).status, 415);
+  assert.equal((await request("GET", `${base}/fail`)).status, 405);
+  assert.equal((await request("POST", `/api/bots/other/handoffs/${id}/fail`)).status, 404);
+  const failed = await request("POST", `${base}/fail`);
+  assert.equal(failed.status, 200);
+  assert.equal(failed.body.status, "failed");
+  assert.equal(typeof failed.body.decidedAt, "string");
+  assert.deepEqual(decided, [`${id}:failed`]);
+  assert.equal((await request("POST", `${base}/approve`)).status, 409);
 });

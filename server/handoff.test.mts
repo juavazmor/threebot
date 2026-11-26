@@ -41,7 +41,7 @@ async function setup(t: TestContext, { allow = { reader: { projects: ["project-a
   const clock = { time: Date.parse("2026-11-26T10:00:00Z") };
   const file = path.join(dir, "handoffs.json");
   const t3 = fakeLauncher();
-  const fullLimits = { pendingPerBot: 3, perHour: 10, perDay: 30, pendingDays: 7, kept: 200, launchSettleMs: 2 * MINUTE, ...limits };
+  const fullLimits = { pendingPerBot: 3, perHour: 10, perDay: 30, pendingDays: 7, kept: 200, ...limits };
   const make = () => createHandoffs({ file, allowlistFile, launcher: t3.launcher, now: () => new Date(clock.time), limits: fullLimits });
   const handoffs = make();
   const propose = (url = "https://example.com/tool", bot = BOT, threadId = "thread-1") => handoffs.propose({ bot, threadId, project: PROJECT, kind: "evaluate-fit", url });
@@ -254,12 +254,12 @@ test("a launch T3 did not answer stays launching, can't be rejected, and becomes
   assert.equal(t3.launched.length, 1);
 });
 
-test("a launch T3 never created is re-sent with the same ids, and only after two quiet minutes can it be rejected", async (t) => {
+test("a launch T3 never created stays launching however long T3 says it has no thread, and approving again re-sends the same ids", async (t) => {
   const { propose, handoffs, t3, clock, stored } = await setup(t);
   const { proposal } = await propose();
   t3.script.launch = async () => { throw new Error("socket closed 1006"); };
   await assert.rejects(handoffs.approve("reader", proposal.id), { status: 504 });
-  // T3 says it has no such thread, but the attempt is recent: still launching.
+  // T3 says it has no such thread: still launching, now and a day later.
   clock.time += MINUTE;
   assert.equal((await handoffs.get("reader", proposal.id)).status, "launching");
   await assert.rejects(handoffs.reject("reader", proposal.id), { status: 409 });
@@ -267,15 +267,79 @@ test("a launch T3 never created is re-sent with the same ids, and only after two
   await assert.rejects(handoffs.approve("reader", proposal.id), { status: 504 });
   assert.equal(t3.launched.length, 2);
   assert.deepEqual(t3.launched[1].launch, t3.launched[0].launch);
-  // Two minutes after the last attempt, with T3 still saying no, it is waiting again.
-  clock.time += 2 * MINUTE - 1;
+  clock.time += 86_400_000;
   assert.equal((await handoffs.list("reader"))[0].status, "launching");
-  clock.time += 1;
-  const back = await handoffs.get("reader", proposal.id);
-  assert.equal(back.status, "pending");
-  assert.match(back.lastError!, /did not start/);
-  assert.equal((await stored(proposal.id)).launchingAt, undefined);
-  assert.equal((await handoffs.reject("reader", proposal.id)).status, "rejected");
+  const later = await handoffs.get("reader", proposal.id);
+  assert.equal(later.status, "launching");
+  assert.equal(later.lastError, undefined);
+  assert.equal(typeof (await stored(proposal.id)).launchingAt, "string");
+  await assert.rejects(handoffs.reject("reader", proposal.id), { status: 409 });
+});
+
+test("a launching proposal whose target became invalid stays launching when approved again", async (t) => {
+  const { propose, handoffs, t3, clock } = await setup(t);
+  const { proposal } = await propose();
+  t3.script.launch = async () => { throw new Error("socket closed 1006"); };
+  await assert.rejects(handoffs.approve("reader", proposal.id), { status: 504 });
+  t3.script.invalid = "the project was archived in T3";
+  clock.time += 86_400_000;
+  await assert.rejects(handoffs.approve("reader", proposal.id), { status: 409, message: /archived.*mark it as failed/ });
+  const still = await handoffs.get("reader", proposal.id);
+  assert.equal(still.status, "launching");
+  assert.equal(still.invalidReason, undefined);
+  assert.equal(t3.launched.length, 1);
+});
+
+test("marking an unconfirmed launch as failed asks T3 first and fails it only when T3 has no thread", async (t) => {
+  const { propose, handoffs, t3, stored, clock } = await setup(t);
+  // Only a launching proposal can be marked failed.
+  const waiting = (await propose("https://example.com/waiting")).proposal;
+  await assert.rejects(handoffs.fail("reader", waiting.id), { status: 409, message: /pending/ });
+  await assert.rejects(handoffs.fail("someone", waiting.id), { status: 404 });
+
+  const { proposal } = await propose();
+  t3.script.launch = async () => { throw new Error("socket closed 1006"); };
+  await assert.rejects(handoffs.approve("reader", proposal.id), { status: 504 });
+  // T3 can't say: nothing changes.
+  t3.script.existsThrows = true;
+  await assert.rejects(handoffs.fail("reader", proposal.id), { status: 502, message: /Nothing was changed/ });
+  assert.equal((await stored(proposal.id)).status, "launching");
+  t3.script.existsThrows = false;
+  clock.time += MINUTE;
+  const failed = await handoffs.fail("reader", proposal.id);
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.decidedAt, new Date(clock.time).toISOString());
+  assert.equal(failed.launchingAt, undefined);
+  // Final: no approve, no reject, and reading it changes nothing.
+  await assert.rejects(handoffs.approve("reader", proposal.id), { status: 409, message: /already failed/ });
+  await assert.rejects(handoffs.reject("reader", proposal.id), { status: 409 });
+  assert.equal((await handoffs.get("reader", proposal.id)).status, "failed");
+  assert.equal((await handoffs.fail("reader", proposal.id)).status, "failed");
+  assert.equal(t3.launched.length, 1);
+});
+
+test("marking as failed a launch T3 did create records it as launched instead", async (t) => {
+  const { propose, handoffs, t3 } = await setup(t);
+  const { proposal } = await propose();
+  t3.script.launch = async (sent) => { t3.threads.add(sent.launch.threadId); throw new Error("T3 timed out"); };
+  t3.script.existsThrows = true;
+  await assert.rejects(handoffs.approve("reader", proposal.id), { status: 504 });
+  t3.script.existsThrows = false;
+  const result = await handoffs.fail("reader", proposal.id);
+  assert.equal(result.status, "launched");
+  assert.equal(result.launchedThreadId, proposal.launch.threadId);
+});
+
+test("marking as failed is refused while an approval is in flight", async (t) => {
+  const { propose, handoffs, t3 } = await setup(t);
+  const { proposal } = await propose();
+  let release!: () => void;
+  t3.script.launch = (sent) => new Promise<void>((resolve) => { release = () => { t3.threads.add(sent.launch.threadId); resolve(); }; });
+  const approving = handoffs.approve("reader", proposal.id);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await assert.rejects(handoffs.fail("reader", proposal.id), { status: 409, message: /being launched/ });
+  release();
+  assert.equal((await approving).status, "launched");
 });
 
 test("a launch left unconfirmed is settled by reading it after a gateway restart", async (t) => {
