@@ -72,14 +72,26 @@ export async function evaluatorProblem(dir: string): Promise<string | null> {
   return null;
 }
 
+const NOT_FOUND_DEPTH = 8;
+
 /**
- * T3's answer for a thread it does not have (checked on 0.1.12): a failure whose chain of causes
- * ends in ProjectionStoreThreadNotFoundError.
+ * T3's answer for a thread it does not have (checked on 0.1.12): every reason a Fail whose error is
+ * an OrchestrationV2GetThreadProjectionError, and whose chain of causes (error.cause, .cause.cause,
+ * ...) reaches a ProjectionStoreThreadNotFoundError by name. Matched by structure, so another
+ * failure that merely mentions those words in a message is not "not found".
  */
 export function threadNotFound(error: unknown): boolean {
-  let text: string;
-  try { text = JSON.stringify((error as { cause?: unknown } | null)?.cause ?? null); } catch { return false; }
-  return /ThreadNotFound/.test(text);
+  const cause = (error as { cause?: unknown } | null)?.cause;
+  const reasons = Array.isArray(cause) ? cause : Array.isArray((cause as { failures?: unknown } | null)?.failures) ? (cause as { failures: unknown[] }).failures : cause ? [cause] : [];
+  return reasons.length > 0 && reasons.every((reason) => {
+    const { _tag, error: failed } = (reason ?? {}) as { _tag?: unknown; error?: { _tag?: unknown; cause?: unknown } };
+    if (_tag !== "Fail" || failed?._tag !== "OrchestrationV2GetThreadProjectionError") return false;
+    let link = failed.cause as { name?: unknown; _tag?: unknown; cause?: unknown } | null | undefined;
+    for (let depth = 0; depth < NOT_FOUND_DEPTH && link && typeof link === "object"; depth++, link = link.cause as typeof link) {
+      if (link.name === "ProjectionStoreThreadNotFoundError" || link._tag === "ProjectionStoreThreadNotFoundError") return true;
+    }
+    return false;
+  });
 }
 
 const refused = (error: unknown) => Object.assign(error instanceof Error ? error : new Error(String(error)), { refused: true });

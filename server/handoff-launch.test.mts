@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { createHandoffs, type HandoffTarget } from "./handoff.mts";
-import { EVALUATOR_PROJECT_TITLE, createHandoffLauncher, evaluatorProblem, t3Refused, type HandoffT3Project } from "./handoff-launch.mts";
+import { EVALUATOR_PROJECT_TITLE, createHandoffLauncher, evaluatorProblem, t3Refused, threadNotFound, type HandoffT3Project } from "./handoff-launch.mts";
 
 /** The evaluator settings handoffs require, and nothing more. */
 const HARDENED = {
@@ -232,4 +232,30 @@ test("T3's own failure answer is told apart from a call that may have gone throu
   assert.equal((await handoffs.get("reader", dropped.id)).status, "launching");
   t3.threadAnswer = null;
   assert.equal(await launcher.threadExists("anything"), false);
+});
+
+test("only T3's own no-such-thread answer, by its structure, counts as a thread T3 does not have", async (t) => {
+  assert.equal(threadNotFound(t3NoThread("t")), true);
+  assert.equal(threadNotFound(Object.assign(new Error("x"), { cause: { failures: t3NoThread("t").cause } })), true);
+  // The same words in a message, another error tag, or the name too deep or nowhere are not it.
+  const mentions = Object.assign(new Error("x"), { cause: [{ _tag: "Fail", error: {
+    _tag: "OrchestrationV2GetThreadProjectionError", message: "ProjectionStoreThreadNotFoundError",
+    cause: { name: "SqliteError", message: "database is locked (ProjectionStoreThreadNotFoundError)", cause: { message: "ThreadNotFound" } },
+  } }] });
+  assert.equal(threadNotFound(mentions), false);
+  const otherTag = Object.assign(new Error("x"), { cause: [{ _tag: "Fail", error: { _tag: "ProjectionStoreThreadNotFoundError", cause: { name: "ProjectionStoreThreadNotFoundError" } } }] });
+  assert.equal(threadNotFound(otherTag), false);
+  const notFail = Object.assign(new Error("x"), { cause: [{ ...t3NoThread("t").cause[0], _tag: "Die" }] });
+  assert.equal(threadNotFound(notFail), false);
+  const mixed = Object.assign(new Error("x"), { cause: [t3NoThread("t").cause[0], { _tag: "Fail", error: { message: "database is locked" } }] });
+  assert.equal(threadNotFound(mixed), false);
+  let deep: Record<string, unknown> = { name: "ProjectionStoreThreadNotFoundError" };
+  for (let i = 0; i < 20; i++) deep = { name: "Wrapper", cause: deep };
+  assert.equal(threadNotFound(Object.assign(new Error("x"), { cause: [{ _tag: "Fail", error: { _tag: "OrchestrationV2GetThreadProjectionError", cause: deep } }] })), false);
+  assert.equal(threadNotFound(new Error("ThreadNotFound")), false);
+
+  // Through the launcher: such an answer leaves the thread unknown, not missing.
+  const { launcher, t3 } = await setup(t);
+  t3.threadAnswer = async () => { throw mentions; };
+  await assert.rejects(launcher.threadExists("anything"));
 });
