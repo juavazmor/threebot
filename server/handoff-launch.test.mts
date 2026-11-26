@@ -387,7 +387,7 @@ test("approving a Bot target posts the stored message to its main conversation, 
 });
 
 test("a message T3 never confirmed is checked by its id in the conversation, and only T3's own refusal sends it back", async (t) => {
-  const { handoffs, propose, t3, launcher, messages } = await setup(t);
+  const { handoffs, propose, t3, launcher, messages, threads } = await setup(t);
   const dropped = (await propose("https://example.com/dropped", "bot:writer")).proposal;
   t3.dispatch = async () => { throw new Error("socket closed 1006"); };
   await assert.rejects(handoffs.approve("reader", dropped.id), { status: 504 });
@@ -401,6 +401,11 @@ test("a message T3 never confirmed is checked by its id in the conversation, and
   t3.threadAnswer = null;
   // The conversation is gone: the message is not there.
   assert.equal(await launcher.arrived({ ...launching, sentToThreadId: "thread-gone" }), false);
+  // The right message id in another conversation is not the message arriving where it was sent.
+  threads.add("thread-elsewhere");
+  messages.set("thread-elsewhere", [launching.launch.messageId!]);
+  assert.equal(await launcher.arrived(launching), false);
+  assert.equal((await handoffs.get("reader", dropped.id)).status, "launching");
   messages.set("thread-writer", [launching.launch.messageId!]);
   assert.equal((await handoffs.get("reader", dropped.id)).status, "launched");
 

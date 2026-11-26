@@ -52,8 +52,10 @@ function fakeLauncher() {
   };
   return { launcher, launched, threads, script, snapshots, sweeps };
 }
-/** What T3 has once a proposal arrived: its thread, or its message. */
-const arrival = (proposal: HandoffProposal) => proposal.targetType === "bot" ? `message:${proposal.launch.messageId}` : proposal.launch.threadId!;
+/** What T3 has once a proposal arrived: its thread, or its message in the conversation it was sent to. */
+const arrival = (proposal: HandoffProposal) => proposal.targetType === "bot" ? delivered(proposal.sentToThreadId, proposal.launch.messageId) : proposal.launch.threadId!;
+/** A message T3 holds, by conversation and id: the same id in another conversation is another entry. */
+const delivered = (threadId: string | undefined, messageId: string | undefined) => `message:${threadId}:${messageId}`;
 
 async function setup(t: TestContext, { allow = { reader: { projects: ["project-app"] } }, limits }: { allow?: unknown; limits?: Partial<HandoffLimits> } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "handoff-"));
@@ -723,8 +725,11 @@ test("an unconfirmed message to a Bot stays launching, is retried to the same co
   assert.deepEqual(t3.launched.map((sent) => [sent.sentToThreadId, sent.launch.commandId, sent.launch.messageId]), [
     ["thread-writer", proposal.launch.commandId, proposal.launch.messageId], ["thread-writer", proposal.launch.commandId, proposal.launch.messageId],
   ]);
+  // The message turning up in the Bot's new conversation is not where it was sent: still launching.
+  t3.threads.add(delivered("thread-writer-2", proposal.launch.messageId));
+  assert.equal((await handoffs.get("reader", proposal.id)).status, "launching");
   // The message shows up: launched, in the conversation it went to.
-  t3.threads.add(arrival(proposal));
+  t3.threads.add(delivered("thread-writer", proposal.launch.messageId));
   const settled = await handoffs.get("reader", proposal.id);
   assert.equal(settled.status, "launched");
   assert.equal(settled.launchedThreadId, "thread-writer");
