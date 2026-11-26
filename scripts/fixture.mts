@@ -17,7 +17,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { MODEL, SAMPLE_IMAGE, SAMPLE_TEXT, samplesFor, STAMP, startFakeT3, type FixtureLink } from './fixture-t3.mts';
 import { T3Client } from '../server/t3rpc.mts';
 import { HANDOFF_FIXTURE, LANDING_SECTIONS, LANDING_USER, fixtureReleases, validateScenario } from './fixture-scenarios.mts';
-import { handoffTitle, renderHandoffPrompt } from '../server/handoff.mts';
+import { handoffTitle, renderBotHandoffMessage, renderHandoffPrompt } from '../server/handoff.mts';
 import { startFakeExecutor } from './fixture-executor.mts';
 
 const repo = fileURLToPath(new URL('../', import.meta.url));
@@ -168,7 +168,7 @@ async function seed(root: string, scenario = 'basic') {
     : { userName: 'Sample User', theme: scenario === 'activity' ? 'system' : 'light', timezone: 'UTC', defaultModel: MODEL };
   await writeFile(path.join(root, 'bots/.botapp/settings.json'), JSON.stringify(settings) + '\n');
   if (scenario === 'adopt') await seedRepo(root);
-  // One Bot may hand off to one sample project, and has a proposal waiting for the user.
+  // One Bot may hand off to one sample project and to Gamma, and has a proposal for each waiting for the user.
   if (scenario === 'interactions') {
     const { proposalId, bot, botName, threadId, projectId, projectTitle, projectDir, url, kind, evaluatorDir } = HANDOFF_FIXTURE;
     // The project is a git repo with a commit: a handoff thread reads a read-only copy of that commit.
@@ -180,11 +180,16 @@ async function seed(root: string, scenario = 'basic') {
       sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, filesystem: { denyRead: ['~/'] } },
       permissions: { deny: ['Bash', 'Edit', 'Write', 'mcp__bot__*', 'mcp__t3-code__t3_thread_send'], disableBypassPermissionsMode: 'disable', blockReadsOutsideWorkingDirectories: true },
     }, null, 2) + '\n');
-    await writeFile(path.join(root, 'bots/.botapp/handoff-allowlist.json'), JSON.stringify({ [bot]: { projects: [projectId] } }, null, 2) + '\n');
+    const { toBot } = HANDOFF_FIXTURE;
+    await writeFile(path.join(root, 'bots/.botapp/handoff-allowlist.json'), JSON.stringify({ [bot]: { projects: [projectId], bots: [toBot.target] } }, null, 2) + '\n');
     await writeFile(path.join(root, 'bots/.botapp/handoffs.json'), JSON.stringify({ version: 1, proposals: [{
-      id: proposalId, botSlug: bot, botName, threadId, projectId, projectTitle, projectPath: path.join(root, projectDir), commit, snapshotPath, kind, url,
+      id: proposalId, botSlug: bot, botName, threadId, targetType: 'project', projectId, projectTitle, projectPath: path.join(root, projectDir), commit, snapshotPath, kind, url,
       title: handoffTitle(kind, url), prompt: renderHandoffPrompt({ kind, url, botSlug: bot, projectTitle, snapshotPath, commit }), status: 'pending', createdAt: new Date().toISOString(),
       launch: { threadId: 'fixture-handoff-thread', commandId: 'fixture-handoff-command' },
+    }, {
+      id: toBot.proposalId, botSlug: bot, botName, threadId, targetType: 'bot', targetBotSlug: toBot.target, targetBotName: toBot.targetName, kind, url: toBot.url,
+      title: handoffTitle(kind, toBot.url), prompt: renderBotHandoffMessage({ kind, url: toBot.url, botSlug: bot }), status: 'pending', createdAt: new Date().toISOString(),
+      launch: { ...toBot.launch },
     }] }, null, 2) + '\n');
   }
   // The notice an automatic update leaves: the app shows "Updated to v…" once.

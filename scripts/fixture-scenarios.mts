@@ -77,8 +77,9 @@ export const INTERACTION_IDS = {
 };
 
 /**
- * The interactions scenario's handoff card: Beta proposed a link for a sample coding project. The
- * gateway keeps the proposal (seeded in fixture.mts); Beta's chat only has the tool call naming it.
+ * The interactions scenario's handoff cards: Beta proposed a link for a sample coding project, and
+ * another for Gamma's chat. The gateway keeps the proposals (seeded in fixture.mts); Beta's chat
+ * only has the tool calls naming them.
  */
 export const HANDOFF_FIXTURE = {
   proposalId: '4d6f8a10-2b3c-4d5e-8f90-a1b2c3d4e5f6',
@@ -89,6 +90,12 @@ export const HANDOFF_FIXTURE = {
   files: { 'README.md': '# Sample app\nA disposable project for the handoff card.\n', '.gitignore': '.env\n' },
   /** The hardened folder handoff threads run in; T3 has no project for it until the first approval. */
   evaluatorDir: 'evaluator',
+  /** The proposal for another Bot: approving it posts the stored message to Gamma's main conversation. */
+  toBot: {
+    proposalId: '7e8f9a0b-1c2d-4e3f-8a5b-c6d7e8f9a0b1', url: 'https://example.com/sample-library',
+    target: 'gamma', targetName: 'Gamma', targetThreadId: 'thread-gamma',
+    launch: { commandId: 'fixture-handoff-bot-command', messageId: 'fixture-handoff-bot-message' },
+  },
 } as const;
 
 export function validateScenario(scenario: string) {
@@ -224,6 +231,10 @@ export function seedInteractions({ threads, items, stamp }: { threads: FixtureTh
   append(HANDOFF_FIXTURE.threadId, 'dynamic_tool', { id: 'fixture-handoff-propose', toolName: 'mcp__bot__handoff_propose',
     input: { target: `project:${HANDOFF_FIXTURE.projectId}`, url: HANDOFF_FIXTURE.url, kind: HANDOFF_FIXTURE.kind, threadId: HANDOFF_FIXTURE.threadId },
     output: { content: [{ type: 'text', text: JSON.stringify({ proposed: true, proposalId: HANDOFF_FIXTURE.proposalId, status: 'waiting-for-user', alreadyWaiting: false }) }] } });
+  message(HANDOFF_FIXTURE.threadId, 'assistant_message', 'I also proposed passing a library to Gamma. Its card says what Gamma would receive in its own chat.');
+  append(HANDOFF_FIXTURE.threadId, 'dynamic_tool', { id: 'fixture-handoff-propose-bot', toolName: 'mcp__bot__handoff_propose',
+    input: { target: `bot:${HANDOFF_FIXTURE.toBot.target}`, url: HANDOFF_FIXTURE.toBot.url, kind: HANDOFF_FIXTURE.kind, threadId: HANDOFF_FIXTURE.threadId },
+    output: { content: [{ type: 'text', text: JSON.stringify({ proposed: true, proposalId: HANDOFF_FIXTURE.toBot.proposalId, status: 'waiting-for-user', alreadyWaiting: false }) }] } });
   const addSecret = (id: string, status = 'pending', threadId = 'thread-alpha') => {
     const item = append(threadId, 'secret_request', { id,
       label: `Generic secret: ${id.slice('fixture-secret-'.length)}`,

@@ -14,7 +14,7 @@ import { ADOPT_REPO, createFixture, gatewayInvocation, smokeFixture } from './fi
 import { FIXTURE_PAIRING_CODE, startFakeT3, type FixtureLink } from './fixture-t3.mts';
 import { APPROVAL_OPTIONS, DUMMY_SECRET, HANDOFF_FIXTURE, INITIAL_ANSWER, INTERACTION_IDS, fixtureReleases } from './fixture-scenarios.mts';
 import { tokenForBot } from '../server/bot-token.mts';
-import { renderHandoffPrompt } from '../server/handoff.mts';
+import { renderBotHandoffMessage, renderHandoffPrompt } from '../server/handoff.mts';
 import { T3Client } from '../server/t3rpc.mts';
 import { EXECUTOR_FIXTURE_IDS, EXECUTOR_FIXTURE_TOKEN } from './fixture-executor.mts';
 
@@ -1308,7 +1308,7 @@ test('a handoff proposal is shown as stored, proposed only by an allowed Bot, an
     assert.equal(made.data.status, 'waiting-for-user');
     assert.equal((await propose(bot, good)).data.proposalId, made.data.proposalId);
     const listed = (await fixture.request(`/api/bots/${bot}/handoffs`)).body.proposals;
-    assert.deepEqual(listed.map((proposal: Json) => proposal.id), [made.data.proposalId, proposalId]);
+    assert.deepEqual(listed.map((proposal: Json) => proposal.id), [made.data.proposalId, HANDOFF_FIXTURE.toBot.proposalId, proposalId]);
     assert.deepEqual(await launches(), []);
     // A proposal made through the tool fixes the project's commit too.
     const fresh = (await fixture.request(`/api/bots/${bot}/handoffs/${made.data.proposalId}`)).body;
@@ -1384,6 +1384,89 @@ test('a handoff is neither proposed nor approved while the evaluator folder has 
     assert.match(approved.body.error, /settings\.json is missing/);
     assert.equal((await fixture.request(`/api/bots/${bot}/handoffs/${proposalId}`)).body.status, 'pending');
     assert.deepEqual((await fixture.request('/t3/fixture/handoff-launches')).body.launches, []);
-    assert.equal((await fixture.request(`/api/bots/${bot}/handoffs`)).body.proposals.length, 1);
+    assert.equal((await fixture.request(`/api/bots/${bot}/handoffs`)).body.proposals.length, 2);
+    // A Bot target needs no evaluator: it is still sent.
+    const toBot = await fixture.request(`/api/bots/${bot}/handoffs/${HANDOFF_FIXTURE.toBot.proposalId}/approve`, 'POST', {});
+    assert.equal(toBot.body.status, 'launched');
+    assert.equal((await fixture.request('/t3/fixture/handoff-launches')).body.dispatches.length, 1);
   } finally { await fixture.close(); }
+});
+
+test('a handoff to another Bot posts the stored message once to its main conversation, and the allowlist resolves "*" each time', { timeout: 45000 }, async () => {
+  const fixture = await createFixture({ scenario: 'interactions' });
+  const { proposalId, bot, threadId, projectId, kind, toBot } = HANDOFF_FIXTURE;
+  const allowlist = path.join(fixture.root, 'bots/.botapp/handoff-allowlist.json');
+  const mcp = async (slug: string, method: string, params: Json) => {
+    const response = await fetch(fixture.url + '/mcp/bot', { method: 'POST', signal: AbortSignal.timeout(5000),
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${tokenForBot('fixture-only', slug)}` },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
+    return (await response.json()) as Json;
+  };
+  const targets = async (slug: string) => ((await mcp(slug, 'tools/list', {})).result.tools.find((tool: Json) => tool.name === 'handoff_propose')?.inputSchema.properties.target.enum ?? null) as string[] | null;
+  const propose = async (target: string, url: string) => {
+    const result = (await mcp(bot, 'tools/call', { name: 'handoff_propose', arguments: { target, url, kind, threadId } })).result;
+    return result.isError ? { refused: result.content[0].text as string, data: null as Json } : { refused: null, data: JSON.parse(result.content[0].text) };
+  };
+  const recorded = async () => (await fixture.request('/t3/fixture/handoff-launches')).body as { launches: Json[]; dispatches: Json[] };
+  const rpc = new T3Client({ baseUrl: fixture.url + '/t3', token: 'fixture-only' });
+  try {
+    await bounded(rpc.connect());
+    // The card's proposal: Gamma, named and labeled as a Bot, with the fixed message.
+    const shown = (await fixture.request(`/api/bots/${bot}/handoffs/${toBot.proposalId}`)).body;
+    assert.equal(shown.targetType, 'bot');
+    assert.equal(shown.targetBotSlug, toBot.target);
+    assert.equal(shown.targetBotName, toBot.targetName);
+    assert.equal(shown.prompt, renderBotHandoffMessage({ kind, url: toBot.url, botSlug: bot }));
+    assert.equal('launch' in shown, false);
+    assert.equal((await fixture.request(`/api/bots/${bot}/handoffs/${proposalId}`)).body.targetType, 'project');
+    const beta = await bounded(rpc.call('orchestration.getThreadProjection', { threadId }));
+    assert.ok(beta.turnItems.find((item: Json) => item.id === 'fixture-handoff-propose-bot').output.content[0].text.includes(toBot.proposalId));
+
+    // Approving sends exactly one message.dispatch, from the gateway, to Gamma's main conversation.
+    const approved = await fixture.request(`/api/bots/${bot}/handoffs/${toBot.proposalId}/approve`, 'POST', {});
+    assert.equal(approved.status, 200);
+    assert.equal(approved.body.status, 'launched');
+    assert.equal(approved.body.launchedThreadId, toBot.targetThreadId);
+    assert.equal(approved.body.sentToThreadId, toBot.targetThreadId);
+    assert.equal((await fixture.request(`/api/bots/${bot}/handoffs/${toBot.proposalId}/approve`, 'POST', {})).body.status, 'launched');
+    const { launches, dispatches } = await recorded();
+    assert.deepEqual(launches, []);
+    assert.equal(dispatches.length, 1);
+    assert.deepEqual(dispatches[0], {
+      type: 'message.dispatch', commandId: toBot.launch.commandId, threadId: toBot.targetThreadId, messageId: toBot.launch.messageId,
+      text: shown.prompt, attachments: [], createdBy: 'agent', creationSource: 'server', dispatchMode: { type: 'queue_after_active' },
+    });
+    const gamma = await bounded(rpc.call('orchestration.getThreadProjection', { threadId: toBot.targetThreadId }));
+    const arrived = gamma.turnItems.filter((item: Json) => item.messageId === toBot.launch.messageId);
+    assert.equal(arrived.length, 1);
+    assert.equal(arrived[0].text, shown.prompt);
+    // No copy and no evaluator project for a Bot target.
+    assert.equal(existsSync(path.join(fixture.root, 'bots/.botapp/handoff-snapshots', `${toBot.proposalId}.json`)), false);
+    assert.equal((await fixture.request('/t3/api/projects')).body.projects.some((project: Json) => project.title === 'Handoff evaluator'), false);
+
+    // A project approval makes the evaluator's project, which "*" never offers.
+    assert.equal((await fixture.request(`/api/bots/${bot}/handoffs/${proposalId}/approve`, 'POST', {})).body.status, 'launched');
+    const evaluator = (await fixture.request('/t3/api/projects')).body.projects.find((project: Json) => project.title === 'Handoff evaluator');
+    assert.ok(evaluator);
+    await writeFile(allowlist, JSON.stringify({ [bot]: { projects: '*', bots: '*' } }));
+    const all = (await targets(bot))!;
+    assert.deepEqual(all.filter((target) => target.startsWith('project:')), [`project:${projectId}`]);
+    assert.deepEqual(all.filter((target) => target.startsWith('bot:')).sort(), ['bot:alpha', 'bot:gamma']);
+    for (const refused of ['project:project-alpha', `project:project-${bot}`, `project:${evaluator.id}`, `bot:${bot}`]) {
+      assert.match((await propose(refused, 'https://example.org/refused')).refused!, /target must be one of/, refused);
+    }
+    const accepted = await propose(`project:${projectId}`, 'https://example.org/star-tool');
+    assert.equal(accepted.refused, null);
+    assert.equal((await fixture.request(`/api/bots/${bot}/handoffs/${accepted.data.proposalId}`)).body.projectId, projectId);
+
+    // Named explicitly, the proposer is still never a target; only Bots allowed means no project.
+    await writeFile(allowlist, JSON.stringify({ [bot]: { bots: [bot, toBot.target] } }));
+    assert.deepEqual(await targets(bot), [`bot:${toBot.target}`]);
+    assert.match((await propose(`bot:${bot}`, 'https://example.org/self')).refused!, /target must be one of/);
+    assert.match((await propose(`project:${projectId}`, 'https://example.org/project')).refused!, /target must be one of the targets you may propose to: bot:gamma\./);
+    // A malformed key costs the Bot the whole entry: no tool at all.
+    await writeFile(allowlist, JSON.stringify({ [bot]: { projects: '*', bots: 'everyone' } }));
+    assert.equal(await targets(bot), null);
+    assert.equal((await recorded()).dispatches.length, 1);
+  } finally { rpc.close(); await fixture.close(); }
 });

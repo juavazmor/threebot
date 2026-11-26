@@ -113,6 +113,8 @@ export async function startFakeT3(root: string, port = 0, { scenario = 'basic', 
     workspaceRoot: path.join(root, HANDOFF_FIXTURE.projectDir), defaultModelSelection: MODEL, createdAt: STAMP, updatedAt: STAMP });
   /** What the gateway asked T3 to launch for an approved handoff, as sent. */
   const handoffLaunches: Record<string, unknown>[] = [];
+  /** Every message.dispatch the gateway itself sent (creationSource "server"), repeats included: an approved Bot-target handoff. */
+  const handoffDispatches: Record<string, unknown>[] = [];
   const makeThread = (slug: string, child = false): FixtureThread => ({ id: `thread-${slug}${child ? '-child' : ''}`,
     projectId: `project-${slug}`, title: child ? (landing?.child.title ?? 'Sample child review') : samples.find((bot) => bot.slug === slug)!.name,
     status: 'idle', activeRunId: null, latestRunId: null, modelSelection: MODEL, runtimeMode: 'auto',
@@ -332,7 +334,7 @@ export async function startFakeT3(root: string, port = 0, { scenario = 'basic', 
       if (links && url.pathname.startsWith('/oauth/mcp/')) return mcpOAuth(req, res, url.pathname);
       if (links && url.pathname === '/mcp' && req.method === 'POST') return mcpCall(req, res);
       if (interactions && url.pathname === '/fixture/interactions' && req.method === 'GET') return json(res, 200, interactions.inspect());
-      if (scenario === 'interactions' && url.pathname === '/fixture/handoff-launches' && req.method === 'GET') return json(res, 200, { fixtureOnly: true, launches: handoffLaunches });
+      if (scenario === 'interactions' && url.pathname === '/fixture/handoff-launches' && req.method === 'GET') return json(res, 200, { fixtureOnly: true, launches: handoffLaunches, dispatches: handoffDispatches });
       if (interactions && url.pathname === '/fixture/interactions/fail-once' && req.method === 'POST') {
         const chunks: Buffer[] = [];
         let size = 0;
@@ -488,6 +490,7 @@ export async function startFakeT3(root: string, port = 0, { scenario = 'basic', 
         if (tag === 'orchestration.dispatchCommand' && ['message.dispatch', 'thread.stop'].includes(payload.type)) {
           const thread = threads.find(thread => thread.id === payload.threadId);
           if (!thread) return fail(ws, id, 'Unknown fixture thread');
+          if (scenario === 'interactions' && payload.type === 'message.dispatch' && payload.creationSource === 'server') handoffDispatches.push(structuredClone(payload));
           if (receipts.has(payload.commandId)) return exit(ws, id, receipts.get(payload.commandId));
           const now = new Date().toISOString();
           const threadRuns = runs.get(thread.id)!;
