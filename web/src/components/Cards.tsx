@@ -538,7 +538,7 @@ function themedPage(html: string, dark: boolean) {
 }
 
 type PageEntry = Extract<Entry, { kind: "page" }>;
-type PageLoad = { kind: "loading" } | { kind: "ready"; html: string; url: string } | { kind: "error" };
+type PageLoad = { kind: "loading" } | { kind: "ready"; html: string } | { kind: "error" };
 const pageHeight = (height: number) => Number.isFinite(height) && height > 0 ? Math.min(Math.max(height, 240), 1400) : 480;
 const pageIsDark = () => typeof document !== "undefined" && document.documentElement.classList.contains("dark");
 function subscribePageTheme(changed: () => void) {
@@ -574,7 +574,7 @@ function PagePreview({ entry }: { entry: PageEntry }) {
         const response = await fetch(url, { signal: controller.signal });
         if (!response.ok) throw new Error("Page unavailable");
         const html = await response.text();
-        if (!controller.signal.aborted) setLoad({ kind: "ready", html, url });
+        if (!controller.signal.aborted) setLoad({ kind: "ready", html });
       } catch {
         if (!controller.signal.aborted) setLoad({ kind: "error" });
       }
@@ -617,11 +617,12 @@ function PagePreview({ entry }: { entry: PageEntry }) {
       </> : <div className="page-card-placeholder">
         {load.kind === "error" ? <div role="alert"><p>Couldn't load this page.</p><button type="button" onClick={() => setAttempt(value => value + 1)}>Retry</button></div> : <span role="status" aria-label="Loading page"><Spinner /></span>}
       </div>}
-      {full && doc && load.kind === "ready" && <dialog ref={dialog} className="page-viewer" aria-label={title} onCancel={event => { event.preventDefault(); setFull(false); }} onClose={() => setFull(false)}>
+      {full && doc && <dialog ref={dialog} className="page-viewer" aria-label={title} onCancel={event => { event.preventDefault(); setFull(false); }} onClose={() => setFull(false)}>
         <div className="page-viewer-header">
           <button ref={close} type="button" onClick={() => setFull(false)} className="page-viewer-action" aria-label="Close page"><X size={22} /></button>
           <span className="page-viewer-title">{title}</span>
-          <a href={load.url} target="_blank" rel="noreferrer" className="page-viewer-action" aria-label="Open in new tab"><ExternalLink size={20} /></a>
+          {/* No "open in new tab": that tab would show the Bot's raw page without this app's network policy. */}
+          <span className="page-viewer-spacer" aria-hidden="true" />
         </div>
         <div className="page-viewer-content">
           <iframe srcDoc={doc} title={title} sandbox="allow-scripts" />

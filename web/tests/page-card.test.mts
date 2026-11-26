@@ -61,7 +61,8 @@ test('open presents the actual interactive sandboxed Page; Close and Escape rest
   assert.match(frame.srcdoc, /onclick="this.textContent=Number\(this.textContent\)\+1"/);
   assert.equal(frame.closest('[inert]'), null); assert.equal(frame.getAttribute('aria-hidden'), null);
   const close = dialog.querySelector('button[aria-label="Close page"]'); assert.equal(document.activeElement, close);
-  const original = dialog.querySelector<HTMLAnchorElement>('a[aria-label="Open in new tab"]'); assert.equal(original.getAttribute('href'), '/t3/assets/counter'); assert.equal(original.rel, 'noreferrer');
+  // Nothing opens the Bot's raw page outside the app's frame and its network policy.
+  assert.equal(dialog.querySelector('a'), null); assert.equal(document.querySelector('a[href*="/assets/"]'), null);
   assert.equal(dialog.querySelector('[aria-label="Share"]'), null);
   await click(close); assert.equal(document.querySelector('dialog'), null); assert.equal(document.activeElement, open); assert.equal(document.body.style.overflow, 'auto');
   await click(open); await settle(() => document.querySelector('dialog').dispatchEvent(new window.Event('cancel', { cancelable: true })));
