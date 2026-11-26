@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createLoginLimiter, mayEnter, trustLocalProcesses, type AuthFacts } from "./auth-policy.mts";
+import { LoginExpired, createLoginLimiter, mayEnter, trustLocalProcesses, type AuthFacts } from "./auth-policy.mts";
 
 const facts = (extra: Partial<AuthFacts> = {}): AuthFacts => ({
   tailnet: false, tailnetUser: false, accessConfigured: false, accessVerified: false, passwordSet: true, session: false, trustLocal: false, ...extra,
@@ -97,10 +97,33 @@ test("a place is taken at once, and only a few checks run together", () => {
   assert.equal(logins.delayFor("a"), 0);
 });
 
-test("a caller that never finishes does not keep its place", async () => {
+test("a caller that never finishes loses its place, cannot go on to a check, and is counted as wrong", async () => {
   const { logins } = limiter({ holdMs: 20 });
-  assert.notEqual(logins.begin("stalled"), null);
+  const stalled = logins.begin("stalled")!;
   assert.equal(logins.begin("stalled"), null);
+  assert.equal(logins.delayFor("stalled"), 0);
   await new Promise((resolve) => setTimeout(resolve, 60));
+  // The place is free again, and holding it counted like a wrong password.
+  assert.equal(logins.delayFor("stalled"), 100);
+  const next = logins.begin("stalled");
+  assert.notEqual(next, null);
+  // The expired attempt wakes up late: it is refused before any password check.
+  await assert.rejects(stalled.wait(), LoginExpired);
+  // Its late result frees nothing a second time and is not counted twice.
+  stalled.done("wrong");
+  assert.equal(logins.begin("stalled"), null);
+  assert.equal(logins.delayFor("stalled"), 100);
+  next!.done("void");
   assert.notEqual(logins.begin("stalled"), null);
+});
+
+test("an attempt that expires while it waits its turn is stopped when the wait ends", async () => {
+  let wake!: () => void;
+  const { logins } = limiter({ holdMs: 20, sleep: () => new Promise<void>((resolve) => { wake = resolve; }) });
+  const first = logins.begin("a")!; await first.wait(); first.done("wrong");
+  const slow = logins.begin("a")!;
+  const waiting = slow.wait();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  wake();
+  await assert.rejects(waiting, LoginExpired);
 });

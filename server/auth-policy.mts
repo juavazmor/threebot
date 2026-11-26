@@ -30,7 +30,15 @@ export function mayEnter(facts: AuthFacts): boolean {
 
 export const trustLocalProcesses = (env = process.env): boolean => env.THREEBOT_TRUST_LOCAL === "true";
 
-/** One sign-in being checked. `wait` holds it back by what earlier wrong passwords earned. */
+/** A sign-in that held its place too long: it is over, and must not go on to check a password. */
+export class LoginExpired extends Error {
+  constructor() { super("That sign-in took too long. Try again."); }
+}
+
+/**
+ * One sign-in being checked. `wait` holds it back by what earlier wrong passwords earned, and
+ * throws LoginExpired when the attempt lost its place meanwhile; call it right before the check.
+ */
 export type LoginAttempt = {
   wait(): Promise<void>;
   /** Frees its place. "wrong" counts against later attempts; "void" is one that never checked a password. */
@@ -47,7 +55,7 @@ export function createLoginLimiter({ perCaller = 1, overall = 3, baseDelayMs = 2
   /** Checks one caller may have running, and all callers together; more are told to try again. */
   perCaller?: number; overall?: number;
   baseDelayMs?: number; maxDelayMs?: number; windowMs?: number;
-  /** A place not given back within this time (a caller that stopped sending) is freed. */
+  /** A place not given back within this time (a caller that stopped sending) is freed, and that attempt is over. */
   holdMs?: number;
   now?: () => number; sleep?: (ms: number) => Promise<void>;
 } = {}) {
@@ -69,25 +77,43 @@ export function createLoginLimiter({ perCaller = 1, overall = 3, baseDelayMs = 2
       if ((running.get(caller) ?? 0) >= perCaller || runningAll >= overall) return null;
       running.set(caller, (running.get(caller) ?? 0) + 1);
       runningAll++;
-      let open = true;
+      // open: holding its place. expired: the place went to someone else and this attempt is over.
+      let state: "open" | "expired" | "closed" = "open";
+      const release = () => {
+        runningAll--;
+        const left = (running.get(caller) ?? 1) - 1;
+        if (left > 0) running.set(caller, left); else running.delete(caller);
+      };
+      const recordWrong = () => {
+        for (const [key, times] of wrong) { const kept = fresh(times); if (kept.length) wrong.set(key, kept); else wrong.delete(key); }
+        // Made-up addresses must not grow this without bound: the oldest callers go first.
+        while (wrong.size >= 2_000) wrong.delete(wrong.keys().next().value!);
+        wrong.set(caller, [...(wrong.get(caller) ?? []), now()]);
+      };
       const attempt: LoginAttempt = {
-        wait: () => { const ms = delayFor(caller); return ms ? sleep(ms) : Promise.resolve(); },
+        async wait() {
+          const ms = delayFor(caller);
+          if (ms) await sleep(ms);
+          if (state !== "open") throw new LoginExpired();
+        },
         done(outcome) {
-          if (!open) return;
-          open = false;
+          if (state === "closed") return;
+          const held = state === "open";
+          state = "closed";
           clearTimeout(expiry);
-          runningAll--;
-          const left = (running.get(caller) ?? 1) - 1;
-          if (left > 0) running.set(caller, left); else running.delete(caller);
+          if (held) release();
+          // An attempt that expired was already counted as wrong; a late "wrong" is not counted twice.
           if (outcome === "ok") wrong.delete(caller);
-          if (outcome !== "wrong") return;
-          for (const [key, times] of wrong) { const kept = fresh(times); if (kept.length) wrong.set(key, kept); else wrong.delete(key); }
-          // Made-up addresses must not grow this without bound: the oldest callers go first.
-          while (wrong.size >= 2_000) wrong.delete(wrong.keys().next().value!);
-          wrong.set(caller, [...(wrong.get(caller) ?? []), now()]);
+          else if (outcome === "wrong" && held) recordWrong();
         },
       };
-      const expiry = setTimeout(() => attempt.done("void"), holdMs);
+      // Holding a place without finishing is not free: it counts like a wrong password.
+      const expiry = setTimeout(() => {
+        if (state !== "open") return;
+        state = "expired";
+        release();
+        recordWrong();
+      }, holdMs);
       expiry.unref?.();
       return attempt;
     },

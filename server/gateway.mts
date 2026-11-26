@@ -22,7 +22,7 @@ import { DEFAULT_MODEL, startProvisioner } from "./provisioner.mts";
 import { keepThreadsActive, settleQuietThreads } from "./auto-settle.mts";
 import { archivedBotIdentities } from "./bot-identities.mts";
 import { createConversationRoutes } from "./bot-conversations.mts";
-import { createLoginLimiter, mayEnter, trustLocalProcesses } from "./auth-policy.mts";
+import { LoginExpired, createLoginLimiter, mayEnter, trustLocalProcesses } from "./auth-policy.mts";
 import { createHandoffs, type HandoffProposal, type HandoffTarget } from "./handoff.mts";
 import { createHandoffLauncher } from "./handoff-launch.mts";
 import { createHandoffTools } from "./handoff-mcp.mts";
@@ -1377,6 +1377,7 @@ const server = http.createServer(async (req, res) => {
           // A session is only worth something where a password made it.
           if (!trustsLocal) return send(res, 409, { error: "No password is set on this server. Set one there with `threebot password`." });
         } else {
+          // Throws when this attempt lost its place: an expired sign-in never reaches the check.
           await attempt.wait();
           outcome = (await passwordMatches(password)) ? "ok" : "wrong";
           if (outcome === "wrong") {
@@ -1384,6 +1385,9 @@ const server = http.createServer(async (req, res) => {
             return send(res, 401, { error: "wrong password" });
           }
         }
+      } catch (error) {
+        if (error instanceof LoginExpired) return send(res, 408, { error: error.message });
+        throw error;
       } finally {
         attempt.done(outcome);
       }
