@@ -100,7 +100,13 @@ function findGit() {
     // Windows ships git as git.exe; every other platform calls it git.
     for (const name of process.platform === 'win32' ? ['git.exe', 'git'] : ['git']) {
       const candidate = path.join(dir, name);
-      if (existsSync(candidate)) return realpathSync(candidate);
+      if (!existsSync(candidate)) continue;
+      // macOS's /usr/bin/git only starts the developer tools' git, which the sandboxed gateway may
+      // not run; ask for the real one.
+      if (process.platform === 'darwin' && candidate === '/usr/bin/git') {
+        try { return realpathSync(execFileSync('/usr/bin/xcrun', ['--find', 'git'], { encoding: 'utf8' }).trim()); } catch { /* no developer tools: use what PATH has */ }
+      }
+      return realpathSync(candidate);
     }
   }
   throw new Error('The adopt scenario needs git on PATH.');
