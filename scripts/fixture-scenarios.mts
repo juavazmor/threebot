@@ -85,6 +85,8 @@ export const HANDOFF_FIXTURE = {
   bot: 'beta', botName: 'Beta', threadId: 'thread-beta',
   projectId: 'project-handoff-sample', projectTitle: 'Sample app', projectDir: 'projects/handoff-sample',
   url: 'https://example.com/sample-tool', kind: 'evaluate-fit',
+  /** The sample project's tracked files, committed when the fixture is seeded. */
+  files: { 'README.md': '# Sample app\nA disposable project for the handoff card.\n', '.gitignore': '.env\n' },
   /** The hardened folder handoff threads run in; T3 has no project for it until the first approval. */
   evaluatorDir: 'evaluator',
 } as const;

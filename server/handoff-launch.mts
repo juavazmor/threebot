@@ -11,6 +11,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { samePath, within } from "./adopted-bots.mts";
 import { launchHandoffThread, pickHandoffModel, type HandoffLauncher, type HandoffProposal, type HandoffRpc, type HandoffTarget } from "./handoff.mts";
+import { SnapshotError, ensureSnapshot, resolveCommit, snapshotPath, sweepSnapshots } from "./handoff-snapshot.mts";
 
 export const EVALUATOR_PROJECT_TITLE = "Handoff evaluator";
 
@@ -167,6 +168,17 @@ export function createHandoffLauncher({ evaluatorDir, rpc, projects, eligible, m
         throw t3Refused(error) ? refused(error) : error;
       }
     },
+
+    commitOf: (projectPath: string) => resolveCommit(projectPath),
+    snapshotPath: (proposalId: string) => snapshotPath(evaluatorDir, proposalId),
+    async prepareSnapshot(proposal: HandoffProposal) {
+      try {
+        await ensureSnapshot({ evaluatorDir, proposalId: proposal.id, projectId: proposal.projectId, projectPath: proposal.projectPath, commit: proposal.commit });
+      } catch (error) {
+        throw Object.assign(error instanceof Error ? error : new Error(String(error)), { invalid: error instanceof SnapshotError && error.invalid });
+      }
+    },
+    sweepSnapshots: (proposals: HandoffProposal[]) => sweepSnapshots({ evaluatorDir, proposals }),
 
     async threadExists(threadId: string) {
       try {

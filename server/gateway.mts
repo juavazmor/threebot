@@ -1136,6 +1136,9 @@ const handoffLauncher = createHandoffLauncher({
   },
 });
 const handoffs = createHandoffs({ file: path.join(appDir, "handoffs.json"), allowlistFile: path.join(appDir, "handoff-allowlist.json"), launcher: handoffLauncher });
+// The read-only project copies handoff threads read: swept at start, once a day and after each approval.
+void handoffs.sweepSnapshots().catch((error) => console.warn(`[handoff] snapshot sweep failed: ${(error as Error).message}`));
+setInterval(() => void handoffs.sweepSnapshots().catch((error) => console.warn(`[handoff] snapshot sweep failed: ${(error as Error).message}`)), 86_400_000).unref();
 /** T3 projects a handoff may target: live ones that are not a Bot (a Bot's folder holds its memory). */
 async function handoffTargets(): Promise<HandoffTarget[]> {
   const [projects, bots] = await Promise.all([t3Projects(), listBots()]);

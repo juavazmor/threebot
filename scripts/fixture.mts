@@ -5,7 +5,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import type { ChildProcess, ChildProcessByStdio } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -98,7 +98,7 @@ export function gatewayInvocation(root: string, port: number, t3Port: number, ex
   };
 }
 
-/** The real path of this machine's git, for the adopt scenario; the test process runs it too. */
+/** The real path of this machine's git, for the adopt and interactions scenarios; the test process runs it too. */
 function findGit() {
   for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
     // Windows ships git as git.exe; every other platform calls it git.
@@ -113,21 +113,40 @@ function findGit() {
       return realpathSync(candidate);
     }
   }
-  throw new Error('The adopt scenario needs git on PATH.');
+  throw new Error('The adopt and interactions scenarios need git on PATH.');
 }
 export const ADOPT_REPO = path.join('projects', 'sample-app');
 /** A disposable git repo with its own tracked CLAUDE.md, AGENTS.md and .gitignore, committed and clean. */
 async function seedRepo(root: string) {
-  const dir = path.join(root, ADOPT_REPO);
+  await commitRepo(root, path.join(root, ADOPT_REPO), {
+    'CLAUDE.md': '# Sample app\nThe repo\'s own Claude rules.\n',
+    'AGENTS.md': '# Sample app\nRun the sample tests before pushing.\n',
+    '.gitignore': 'node_modules/\n',
+    'index.js': 'console.log("sample");\n',
+  });
+}
+
+/** Removes a fixture folder, including the read-only handoff snapshots in it; never follows a symlink. */
+async function removeTree(target: string) {
+  const open = async (entry: string) => {
+    const info = await lstat(entry).catch(() => null);
+    if (!info || !info.isDirectory()) return;
+    await chmod(entry, 0o700);
+    for (const name of await readdir(entry)) await open(path.join(entry, name));
+  };
+  await open(target);
+  await rm(target, { recursive: true, force: true });
+}
+
+/** Writes `files` into a new git repo at `dir` and commits them; returns the commit's sha. */
+async function commitRepo(root: string, dir: string, files: Record<string, string>) {
   await mkdir(dir, { recursive: true });
-  await writeFile(path.join(dir, 'CLAUDE.md'), '# Sample app\nThe repo\'s own Claude rules.\n');
-  await writeFile(path.join(dir, 'AGENTS.md'), '# Sample app\nRun the sample tests before pushing.\n');
-  await writeFile(path.join(dir, '.gitignore'), 'node_modules/\n');
-  await writeFile(path.join(dir, 'index.js'), 'console.log("sample");\n');
-  const run = (...args: string[]) => execFileSync(findGit(), ['-C', dir, ...args], { env: { PATH: process.env.PATH, HOME: path.join(root, 'home'), GIT_CONFIG_NOSYSTEM: '1', XDG_CONFIG_HOME: path.join(root, 'home', '.config') } });
+  for (const [name, text] of Object.entries(files)) await writeFile(path.join(dir, name), text);
+  const run = (...args: string[]) => execFileSync(findGit(), ['-C', dir, ...args], { encoding: 'utf8', env: { PATH: process.env.PATH, HOME: path.join(root, 'home'), GIT_CONFIG_NOSYSTEM: '1', XDG_CONFIG_HOME: path.join(root, 'home', '.config') } });
   run('init', '-q');
   run('add', '-A');
   run('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Sample app');
+  return run('rev-parse', 'HEAD').trim();
 }
 
 async function seed(root: string, scenario = 'basic') {
@@ -152,7 +171,9 @@ async function seed(root: string, scenario = 'basic') {
   // One Bot may hand off to one sample project, and has a proposal waiting for the user.
   if (scenario === 'interactions') {
     const { proposalId, bot, botName, threadId, projectId, projectTitle, projectDir, url, kind, evaluatorDir } = HANDOFF_FIXTURE;
-    await mkdir(path.join(root, projectDir), { recursive: true });
+    // The project is a git repo with a commit: a handoff thread reads a read-only copy of that commit.
+    const commit = await commitRepo(root, path.join(root, projectDir), HANDOFF_FIXTURE.files);
+    const snapshotPath = path.join(root, evaluatorDir, 'snapshots', proposalId);
     await mkdir(path.join(root, evaluatorDir, '.claude'), { recursive: true });
     await writeFile(path.join(root, evaluatorDir, '.claude', 'settings.json'), JSON.stringify({
       sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false },
@@ -160,8 +181,8 @@ async function seed(root: string, scenario = 'basic') {
     }, null, 2) + '\n');
     await writeFile(path.join(root, 'bots/.botapp/handoff-allowlist.json'), JSON.stringify({ [bot]: { projects: [projectId] } }, null, 2) + '\n');
     await writeFile(path.join(root, 'bots/.botapp/handoffs.json'), JSON.stringify({ version: 1, proposals: [{
-      id: proposalId, botSlug: bot, botName, threadId, projectId, projectTitle, projectPath: path.join(root, projectDir), kind, url,
-      title: handoffTitle(kind, url), prompt: renderHandoffPrompt({ kind, url, botSlug: bot, projectTitle, projectPath: path.join(root, projectDir) }), status: 'pending', createdAt: new Date().toISOString(),
+      id: proposalId, botSlug: bot, botName, threadId, projectId, projectTitle, projectPath: path.join(root, projectDir), commit, snapshotPath, kind, url,
+      title: handoffTitle(kind, url), prompt: renderHandoffPrompt({ kind, url, botSlug: bot, projectTitle, snapshotPath, commit }), status: 'pending', createdAt: new Date().toISOString(),
       launch: { threadId: 'fixture-handoff-thread', commandId: 'fixture-handoff-command' },
     }] }, null, 2) + '\n');
   }
@@ -216,7 +237,7 @@ export async function createFixture({ port = 0, scenario = 'basic', links }: { p
     async restart() {
       if (closed) throw new Error('Fixture already closed');
       await stopChild(child);
-      const invocation = gatewayInvocation(root, gatewayPort, fake!.port, executor?.port, { git: scenario === 'adopt', releases: scenario === 'release-notes' });
+      const invocation = gatewayInvocation(root, gatewayPort, fake!.port, executor?.port, { git: scenario === 'adopt' || scenario === 'interactions', releases: scenario === 'release-notes' });
       child = spawn(invocation.command, invocation.args, { env: invocation.env, cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
       logs = '';
       await new Promise<void>((resolve, reject) => {
@@ -243,7 +264,7 @@ export async function createFixture({ port = 0, scenario = 'basic', links }: { p
       await stopChild(child);
       const t3Port = fake!.port;
       await fake!.close();
-      for (const dir of ['home', 'codex', 'tmp', 'secrets', 'vault', 'samples', 'bots', 'projects', 'evaluator']) await rm(path.join(root, dir), { recursive: true, force: true });
+      for (const dir of ['home', 'codex', 'tmp', 'secrets', 'vault', 'samples', 'bots', 'projects', 'evaluator']) await removeTree(path.join(root, dir));
       await seed(root, scenario);
       executor?.reset();
       fake = await startFakeT3(root, t3Port, { scenario, executor: executor?.links, links });
@@ -255,7 +276,7 @@ export async function createFixture({ port = 0, scenario = 'basic', links }: { p
       await stopChild(child);
       await fake?.close();
       await executor?.close();
-      await rm(root, { recursive: true, force: true });
+      await removeTree(root);
     },
   };
   try {

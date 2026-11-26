@@ -44,7 +44,8 @@ const stored = (extra = {}) => ({
   kind: "evaluate-fit", kindLabel: "Evaluate fit", url: "https://example.com/tool", title: "Evaluate fit: example.com",
   prompt: "Handoff from Reader.\n\nLink: https://example.com/tool\n\nRules:\n- Investigate only.", status: "pending", createdAt: "2026-11-26T10:00:00.000Z",
   launchSettings: { runtimeMode: "approval-required", interactionMode: "plan", workspaceStrategy: { type: "root" } },
-  evaluatorDir: "/home/user/.threebot/evaluator", ...extra,
+  evaluatorDir: "/home/user/.threebot/evaluator", commit: "0123456789abcdef0123456789abcdef01234567",
+  snapshotPath: `/home/user/.threebot/evaluator/snapshots/${ID}`, ...extra,
 });
 
 let root, host, requests, answer;
@@ -131,7 +132,7 @@ test("the card shows the stored proposal and the exact message, and Approve laun
   assert.match(host.textContent, /\/work\/app/);
   assert.match(host.textContent, /Plan mode: it reads the approved copy of the project and the web without asking, and it can send what it reads to the web; it asks before editing files or running other threads/);
   assert.doesNotMatch(host.textContent, /asks before (any change|it changes anything)/);
-  assert.match(host.textContent, /The isolated evaluator folder \/home\/user\/\.threebot\/evaluator, reading the project at \/work\/app/);
+  assert.match(host.textContent, /The isolated evaluator folder \/home\/user\/\.threebot\/evaluator, reading a read-only copy of the project at commit 0123456789(?!a)/);
   // The whole message, not a clipped scroll box.
   const pre = host.querySelector("pre");
   assert.equal(pre.textContent, stored().prompt);

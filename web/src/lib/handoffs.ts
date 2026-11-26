@@ -14,6 +14,9 @@ export type HandoffProposal = {
   projectId: string;
   projectTitle: string;
   projectPath: string;
+  /** The commit the proposal fixed; the thread reads a read-only copy of it at snapshotPath. */
+  commit?: string;
+  snapshotPath?: string;
   kind: string;
   kindLabel: string;
   url: string;
@@ -29,7 +32,7 @@ export type HandoffProposal = {
   lastError?: string;
   invalidReason?: string;
   launchSettings: { runtimeMode: string; interactionMode: string; workspaceStrategy: { type: string } };
-  /** The isolated folder the thread runs in; it reads the project at projectPath. */
+  /** The isolated folder the thread runs in; it reads the copy at snapshotPath. */
   evaluatorDir: string | null;
 };
 
@@ -78,9 +81,10 @@ export function handoffRunsAs(settings: HandoffProposal["launchSettings"]): stri
   return `${settings.interactionMode} mode, ${settings.runtimeMode}`;
 }
 
-/** Where the thread runs: the evaluator folder, reading the project at its path. */
-export function handoffRunsIn(proposal: Pick<HandoffProposal, "evaluatorDir" | "projectPath" | "launchSettings">): string {
-  if (proposal.evaluatorDir) return `The isolated evaluator folder ${proposal.evaluatorDir}, reading the project at ${proposal.projectPath}`;
+/** Where the thread runs: the evaluator folder, reading a read-only copy of the project at one commit. */
+export function handoffRunsIn(proposal: Pick<HandoffProposal, "evaluatorDir" | "commit" | "launchSettings">): string {
+  if (proposal.evaluatorDir && proposal.commit) return `The isolated evaluator folder ${proposal.evaluatorDir}, reading a read-only copy of the project at commit ${proposal.commit.slice(0, 10)}`;
+  if (proposal.evaluatorDir) return `The isolated evaluator folder ${proposal.evaluatorDir}`;
   return proposal.launchSettings.workspaceStrategy.type === "root" ? "The project's folder" : "A new worktree";
 }
 

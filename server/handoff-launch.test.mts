@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { chmod, lstat, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
@@ -21,9 +22,29 @@ const t3NoThread = (threadId: string) => Object.assign(new Error("Failed to load
   cause: { name: "OrchestratorProjectionError", cause: { name: "ProjectionStoreThreadNotFoundError", message: `No orchestration projection exists for thread ${threadId}.` } },
 } }] });
 
+/** Removes a folder that holds read-only snapshots. */
+async function forceRemove(dir: string) {
+  const open = async (target: string) => {
+    const info = await lstat(target).catch(() => null);
+    if (!info || info.isSymbolicLink()) return;
+    await chmod(target, 0o700);
+    if (info.isDirectory()) for (const name of await readdir(target)) await open(path.join(target, name));
+  };
+  await open(dir);
+  await rm(dir, { recursive: true, force: true });
+}
+
 async function setup(t: TestContext, { settings = true }: { settings?: boolean } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "handoff-launch-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  t.after(() => forceRemove(dir));
+  // The target project: a git repo with one commit.
+  const app = path.join(dir, "app");
+  await mkdir(app);
+  await writeFile(path.join(app, "README.md"), "# App\n");
+  const git = (...args: string[]) => execFileSync("git", ["-C", app, ...args], { env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" } });
+  git("init", "-q");
+  git("add", "-A");
+  git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "first");
   const evaluatorDir = path.join(dir, "evaluator");
   await mkdir(path.join(evaluatorDir, ".claude"), { recursive: true });
   if (settings) await writeFile(path.join(evaluatorDir, ".claude", "settings.json"), JSON.stringify(HARDENED));
@@ -137,7 +158,9 @@ test("an approved handoff runs in the evaluator's project, made once when T3 has
   const { handoffs, propose, calls, evaluatorDir, projects } = await setup(t);
   const first = (await propose("https://example.com/one")).proposal;
   const second = (await propose("https://example.org/two")).proposal;
-  assert.match(first.prompt, new RegExp(`^Project folder: ${projects[0].workspaceRoot!.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}$`, "m"));
+  assert.equal(first.snapshotPath, path.join(evaluatorDir, "snapshots", first.id));
+  assert.ok(first.prompt.includes(`at commit ${first.commit}: ${first.snapshotPath}\n`));
+  assert.equal(first.prompt.includes(projects[0].workspaceRoot!), false);
   // Two approvals at once make one evaluator project.
   const [a, b] = await Promise.all([handoffs.approve("reader", first.id), handoffs.approve("reader", second.id)]);
   assert.equal(a.status, "launched");
@@ -159,6 +182,8 @@ test("an approved handoff runs in the evaluator's project, made once when T3 has
     assert.deepEqual(launch.modelSelection, CLAUDE);
   }
   assert.equal(launches.find((launch) => launch.threadId === first.launch.threadId).initialMessage.text, first.prompt);
+  // Each approved thread's copy exists, with the project's tracked file.
+  for (const proposal of [first, second]) assert.deepEqual(await readdir(proposal.snapshotPath), ["README.md"]);
 });
 
 test("an existing evaluator project is found by its folder, and archived ones are not used", async (t) => {
@@ -258,4 +283,14 @@ test("only T3's own no-such-thread answer, by its structure, counts as a thread 
   const { launcher, t3 } = await setup(t);
   t3.threadAnswer = async () => { throw mentions; };
   await assert.rejects(launcher.threadExists("anything"));
+});
+
+test("a target folder that is not a git repo with a commit gets no proposal", async (t) => {
+  const { handoffs, dir } = await setup(t);
+  const plain = path.join(dir, "plain");
+  await mkdir(plain);
+  await assert.rejects(handoffs.propose({ bot: { slug: "reader", name: "Reader" }, threadId: "thread-1", project: { projectId: "project-app", title: "App", path: plain }, kind: "evaluate-fit", url: "https://example.com/tool" }),
+    { status: 400, message: /not a git repository with a commit/ });
+  assert.deepEqual(await handoffs.list("reader"), []);
+  assert.deepEqual(await readdir(dir).then((names) => names.includes("evaluator") ? readdir(path.join(dir, "evaluator")) : []), [".claude"]);
 });

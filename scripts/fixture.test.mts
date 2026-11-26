@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
-import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -1278,8 +1278,13 @@ test('a handoff proposal is shown as stored, proposed only by an allowed Bot, an
     const shown = await fixture.request(`/api/bots/${bot}/handoffs/${proposalId}`);
     assert.equal(shown.status, 200);
     assert.equal(shown.body.status, 'pending');
-    assert.equal(shown.body.prompt, renderHandoffPrompt({ kind, url, botSlug: bot, projectTitle, projectPath }));
-    assert.ok(shown.body.prompt.includes(`Project folder: ${projectPath}\n`));
+    const snapshotPath = path.join(fixture.root, evaluatorDir, 'snapshots', proposalId);
+    const commit = execFileSync('git', ['-C', projectPath, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    assert.equal(shown.body.commit, commit);
+    assert.equal(shown.body.snapshotPath, snapshotPath);
+    assert.equal(shown.body.prompt, renderHandoffPrompt({ kind, url, botSlug: bot, projectTitle, snapshotPath, commit }));
+    assert.ok(shown.body.prompt.includes(`Read-only copy of the project at commit ${commit}: ${snapshotPath}\n`));
+    assert.equal(shown.body.prompt.includes(projectPath), false);
     assert.equal(shown.body.projectTitle, 'Sample app');
     assert.equal(shown.body.evaluatorDir, path.join(fixture.root, evaluatorDir));
     assert.deepEqual(shown.body.launchSettings, { runtimeMode: 'approval-required', interactionMode: 'plan', workspaceStrategy: { type: 'root' } });
@@ -1304,6 +1309,15 @@ test('a handoff proposal is shown as stored, proposed only by an allowed Bot, an
     const listed = (await fixture.request(`/api/bots/${bot}/handoffs`)).body.proposals;
     assert.deepEqual(listed.map((proposal: Json) => proposal.id), [made.data.proposalId, proposalId]);
     assert.deepEqual(await launches(), []);
+    // A proposal made through the tool fixes the project's commit too.
+    const fresh = (await fixture.request(`/api/bots/${bot}/handoffs/${made.data.proposalId}`)).body;
+    assert.equal(fresh.commit, commit);
+    assert.equal(fresh.snapshotPath, path.join(fixture.root, evaluatorDir, 'snapshots', made.data.proposalId));
+
+    // Untracked files in the live project never reach the copy the thread reads.
+    await writeFile(path.join(projectPath, 'untracked.txt'), 'not committed\n');
+    await writeFile(path.join(projectPath, '.env'), 'SECRET=fixture\n');
+    assert.equal(existsSync(snapshotPath), false);
 
     // Approving launches the stored message, contained, exactly once; a second tap changes nothing.
     const approved = await fixture.request(`/api/bots/${bot}/handoffs/${proposalId}/approve`, 'POST', {});
@@ -1318,7 +1332,16 @@ test('a handoff proposal is shown as stored, proposed only by an allowed Bot, an
     assert.equal(evaluator[0].title, 'Handoff evaluator');
     assert.equal(launch.projectId, evaluator[0].id);
     assert.notEqual(launch.projectId, projectId);
-    assert.ok(launch.initialMessage.text.includes(`Project folder: ${projectPath}\n`));
+    assert.ok(launch.initialMessage.text.includes(`Read-only copy of the project at commit ${commit}: ${snapshotPath}\n`));
+    // The copy exists, holds the tracked files only, and is read-only.
+    assert.deepEqual((await readdir(snapshotPath)).sort(), Object.keys(HANDOFF_FIXTURE.files).sort());
+    assert.equal(existsSync(path.join(snapshotPath, '.git')), false);
+    assert.equal(existsSync(path.join(snapshotPath, 'untracked.txt')), false);
+    assert.equal(existsSync(path.join(snapshotPath, '.env')), false);
+    assert.equal((await stat(snapshotPath)).mode & 0o777, 0o555);
+    assert.equal((await stat(path.join(snapshotPath, 'README.md'))).mode & 0o777, 0o444);
+    assert.equal(await readFile(path.join(snapshotPath, 'README.md'), 'utf8'), HANDOFF_FIXTURE.files['README.md']);
+    assert.equal(JSON.parse(await readFile(`${snapshotPath}.json`, 'utf8')).commit, commit);
     assert.equal(launch.title, 'Evaluate fit: example.com');
     assert.equal(launch.runtimeMode, 'approval-required');
     assert.equal(launch.interactionMode, 'plan');

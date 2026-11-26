@@ -30,6 +30,10 @@ async function setup(t: TestContext, allow: unknown = { reader: { projects: ["pr
     invalidTarget: async () => null,
     launch: async (proposal) => { if (t3.drops) throw new Error("T3 timed out"); launched.push(proposal); },
     threadExists: async (threadId) => launched.some((proposal) => proposal.launch.threadId === threadId),
+    commitOf: async () => "0123456789abcdef0123456789abcdef01234567",
+    snapshotPath: (proposalId) => `/evaluator/snapshots/${proposalId}`,
+    prepareSnapshot: async () => {},
+    sweepSnapshots: async () => {},
   };
   const handoffs = createHandoffs({ file: path.join(dir, "handoffs.json"), allowlistFile, launcher });
   const proposed: HandoffProposal[] = [];
@@ -151,6 +155,8 @@ test("the app reads a proposal and answers it, and nothing can edit it", async (
   assert.equal(shown.prompt, (await handoffs.get("reader", first)).prompt);
   assert.equal(shown.kindLabel, "Evaluate fit");
   assert.equal(shown.evaluatorDir, "/evaluator");
+  assert.equal(shown.commit, "0123456789abcdef0123456789abcdef01234567");
+  assert.equal(shown.snapshotPath, `/evaluator/snapshots/${first}`);
   assert.equal("launch" in shown, false);
 
   // Another Bot's address, a cross-site request, and every way of changing a proposal.
