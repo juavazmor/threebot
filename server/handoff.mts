@@ -37,7 +37,11 @@ export type HandoffStatus = "pending" | "launching" | "launched" | "rejected" | 
  * evaluates: Claude Code takes its settings (OS sandbox, deny rules) and MCP servers from the folder
  * it runs in, so a project's own .claude/ or .mcp.json can't loosen them, and the evaluator's
  * hardened settings apply whatever project is evaluated. The project is only read, as a read-only
- * copy of one commit inside the evaluator folder.
+ * copy of one commit inside the evaluator folder. Every proposal's copy sits in the same execute-only
+ * snapshots/ folder, under its proposal's random UUID: a thread can open its own copy by the path
+ * its message names but can't list the others, and their records are kept outside the evaluator
+ * folder. That holds because the evaluator has no shell and no write tools to change the folder's
+ * mode (handoff-snapshot.mts).
  * `root` uses the evaluator folder as it is: no worktree, so no setup script runs.
  */
 export const HANDOFF_LAUNCH = {

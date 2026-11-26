@@ -3,11 +3,22 @@
 // .env, build output or anything else untracked or ignored stays out, and so do .git, symlinks and
 // submodules. The commit is fixed when the Bot proposes, so the approved text stays true however
 // the project moves on.
-//   - The export lands in a temporary folder inside snapshots/ and is renamed into place only when
-//     complete; then it is made read-only and a sibling <proposalId>.json records what it holds.
+//   - Copies are kept apart from each other by not being findable: snapshots/ is execute-only for
+//     its owner (SNAPSHOTS_MODE, 0311), so a known name can be opened but the folder can't be listed,
+//     and each copy's name is its proposal's random UUID, which an evaluator only sees for its own.
+//     That relies on the evaluator having no shell and no write tools (evaluatorSettingsGaps requires
+//     Bash, Edit and Write denied), so it can't chmod the folder back, and on nothing readable from
+//     inside the evaluator folder naming other proposals. The mode is set when the folder is made
+//     and asserted again on every export and sweep; nothing here ever makes it listable.
+//   - What each copy holds is recorded outside the evaluator folder, in the gateway's records folder
+//     (<appDir>/handoff-snapshots/<proposalId>.json). The record is written, as "exporting" with the
+//     temporary folder's name, before anything is made in snapshots/, and completed afterwards.
+//   - The export lands in that temporary folder inside snapshots/ (named with the proposal id and a
+//     random UUID) and is renamed into place only when complete; then it is made read-only.
 //   - Sizes are read from git before anything is written: a repo over the caps is refused, never
 //     written out first.
-//   - sweepSnapshots removes old and unneeded copies, touching only entries it could have made.
+//   - sweepSnapshots works from the records, since it can't list snapshots/: it removes old and
+//     unneeded copies and stale exports by name, touching only entries it could have made.
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs, type Stats } from "node:fs";
@@ -38,8 +49,13 @@ export class SnapshotError extends Error {
   constructor(message: string, invalid = false) { super(message); this.invalid = invalid; }
 }
 
+/** snapshots/: its owner may open and make entries by name, nobody may list it. */
+export const SNAPSHOTS_MODE = 0o311;
+
 export const snapshotsDir = (evaluatorDir: string) => path.join(evaluatorDir, "snapshots");
 export const snapshotPath = (evaluatorDir: string, proposalId: string) => path.join(snapshotsDir(evaluatorDir), proposalId);
+/** Where a copy's record is kept: the gateway's records folder, never the evaluator folder. */
+export const snapshotRecordPath = (recordsDir: string, proposalId: string) => path.join(recordsDir, `${proposalId}.json`);
 
 // No hooks, pagers or fsmonitor; read-only commands that take no lock.
 const GIT_FLAGS = ["-c", "core.fsmonitor=false", "-c", "core.pager=cat"];
@@ -70,8 +86,16 @@ export async function resolveCommit(projectPath: string): Promise<string> {
   return sha;
 }
 
-/** What a finished copy holds, written next to it as <proposalId>.json. */
-export type SnapshotRecord = { proposalId: string; projectId: string; commit: string; createdAt: string; files: number; bytes: number; skipped: string[] };
+/**
+ * A copy's record in the records folder. "exporting": written before anything is made in snapshots/,
+ * naming the temporary folder (`temp`); "complete": what the finished copy holds.
+ */
+export type SnapshotRecord = {
+  proposalId: string; projectId: string; commit: string; createdAt: string;
+  state: "exporting" | "complete";
+  temp?: string;
+  files?: number; bytes?: number; skipped?: string[];
+};
 
 type TreeEntry = { mode: string; type: string; object: string; size: number; path: string };
 
@@ -174,26 +198,76 @@ async function readRecord(file: string): Promise<SnapshotRecord | null> {
     const info = await fs.lstat(file);
     if (!info.isFile()) return null;
     const parsed = JSON.parse(await fs.readFile(file, "utf8"));
-    return parsed && typeof parsed === "object" ? parsed as SnapshotRecord : null;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as SnapshotRecord : null;
   } catch { return null; }
 }
 
-/** snapshots/ itself, made if missing; null when it is a symlink or not a folder (then nothing is touched). */
+/** A temporary export folder's name for this proposal, as ensureSnapshot makes them. */
+const isTempName = (name: unknown, proposalId: string): name is string =>
+  typeof name === "string" && name.startsWith(`${TEMP_PREFIX}${proposalId}-`) && UUID.test(name.slice(`${TEMP_PREFIX}${proposalId}-`.length));
+
+/**
+ * snapshots/ itself, made if missing, with SNAPSHOTS_MODE asserted (an older listable folder is fixed
+ * here); null when it is a symlink or not a folder (then nothing is touched).
+ */
 async function ownSnapshotsDir(evaluatorDir: string, create: boolean): Promise<string | null> {
   const dir = snapshotsDir(evaluatorDir);
   try {
     const info = await fs.lstat(dir);
-    return info.isDirectory() && !info.isSymbolicLink() ? dir : null;
+    if (!info.isDirectory() || info.isSymbolicLink()) return null;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT" || !create) return null;
     // Two first exports at once both get here; the one that loses the race finds the folder made.
-    try { await fs.mkdir(dir, { mode: 0o700 }); }
+    try { await fs.mkdir(dir, { mode: SNAPSHOTS_MODE }); }
     catch (raced) {
       if ((raced as NodeJS.ErrnoException).code !== "EEXIST") throw raced;
       return ownSnapshotsDir(evaluatorDir, false);
     }
-    return dir;
   }
+  // Asserted every time, never loosened: mkdir's mode is filtered by the umask, and a folder from
+  // before this layout was listable.
+  await fs.chmod(dir, SNAPSHOTS_MODE);
+  return dir;
+}
+
+/** The records folder, made if missing and kept private; throws when it is not a plain folder. */
+async function ownRecordsDir(recordsDir: string): Promise<void> {
+  await fs.mkdir(recordsDir, { recursive: true, mode: 0o700 });
+  const info = await fs.lstat(recordsDir);
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new SnapshotError(`The handoff snapshot records folder ${recordsDir} is not a plain folder.`);
+  await fs.chmod(recordsDir, 0o700);
+}
+
+async function writeRecord(recordsDir: string, record: SnapshotRecord) {
+  const temp = path.join(recordsDir, `.${record.proposalId}-${randomUUID()}.tmp`);
+  await fs.writeFile(temp, JSON.stringify(record, null, 2) + "\n", { mode: 0o600 });
+  await fs.rename(temp, snapshotRecordPath(recordsDir, record.proposalId));
+}
+
+async function removeRecord(recordsDir: string, proposalId: string): Promise<boolean> {
+  const file = snapshotRecordPath(recordsDir, proposalId);
+  if (!(await fs.lstat(file).catch(() => null))) return false;
+  await fs.rm(file, { force: true });
+  return true;
+}
+
+/**
+ * The previous layout kept <proposalId>.json inside snapshots/, where any evaluator could read it.
+ * A record whose copy is there moves to the records folder (unless one is there already); either
+ * way the old file goes. Only ever opened by name.
+ */
+async function moveLegacyRecord(dir: string, recordsDir: string, proposalId: string) {
+  const legacy = path.join(dir, `${proposalId}.json`);
+  const info = await fs.lstat(legacy).catch(() => null);
+  if (!info) return;
+  if (info.isFile() && !(await readRecord(snapshotRecordPath(recordsDir, proposalId)))) {
+    const record = await readRecord(legacy);
+    const folder = await fs.lstat(path.join(dir, proposalId)).catch(() => null);
+    if (record?.proposalId === proposalId && typeof record.commit === "string" && COMMIT.test(record.commit) && folder?.isDirectory() && !folder.isSymbolicLink()) {
+      await writeRecord(recordsDir, { ...record, state: "complete" });
+    }
+  }
+  await removeEntry(legacy);
 }
 
 /**
@@ -203,20 +277,22 @@ async function ownSnapshotsDir(evaluatorDir: string, create: boolean): Promise<s
  */
 export const SNAPSHOT_LIMITS = { maxFileBytes: SNAPSHOT_MAX_FILE_BYTES, maxTrackedBytes: SNAPSHOT_MAX_TRACKED_BYTES, maxKeptBytes: SNAPSHOT_MAX_KEPT_BYTES };
 
-export async function ensureSnapshot({ evaluatorDir, proposalId, projectId, projectPath, commit, now = () => new Date(), limits = SNAPSHOT_LIMITS }: {
-  evaluatorDir: string; proposalId: string; projectId: string; projectPath: string; commit: string; now?: () => Date; limits?: typeof SNAPSHOT_LIMITS;
+export async function ensureSnapshot({ evaluatorDir, recordsDir, proposalId, projectId, projectPath, commit, now = () => new Date(), limits = SNAPSHOT_LIMITS }: {
+  evaluatorDir: string; recordsDir: string; proposalId: string; projectId: string; projectPath: string; commit: string; now?: () => Date; limits?: typeof SNAPSHOT_LIMITS;
 }): Promise<SnapshotRecord> {
   if (!UUID.test(proposalId) || !COMMIT.test(commit)) throw new SnapshotError("This proposal has no commit to copy.", true);
   const dir = await ownSnapshotsDir(evaluatorDir, true);
   if (!dir) throw new SnapshotError(`The evaluator's snapshots folder ${snapshotsDir(evaluatorDir)} is not a plain folder.`);
+  await ownRecordsDir(recordsDir);
+  await moveLegacyRecord(dir, recordsDir, proposalId);
   const target = path.join(dir, proposalId);
-  const recordFile = `${target}.json`;
-  const existing = await readRecord(recordFile);
+  const existing = await readRecord(snapshotRecordPath(recordsDir, proposalId));
   const folder = await fs.lstat(target).catch(() => null);
-  if (existing?.commit === commit && existing.proposalId === proposalId && folder?.isDirectory() && !folder.isSymbolicLink()) return existing;
-  // Anything half there (a crash between rename and record) is made again.
+  if (existing?.state === "complete" && existing.commit === commit && existing.proposalId === proposalId && folder?.isDirectory() && !folder.isSymbolicLink()) return existing;
+  // Anything half there (a crash before the record was completed) is made again.
   if (folder) await removeEntry(target);
-  if (existing || (await fs.lstat(recordFile).catch(() => null))) await removeEntry(recordFile);
+  if (isTempName(existing?.temp, proposalId)) await removeEntry(path.join(dir, existing.temp));
+  await removeRecord(recordsDir, proposalId);
 
   try { await git(projectPath, ["cat-file", "-e", `${commit}^{commit}`]); }
   catch (error) {
@@ -255,9 +331,14 @@ export async function ensureSnapshot({ evaluatorDir, proposalId, projectId, proj
   if (bytes > limits.maxKeptBytes) throw new SnapshotError(`The project is too large to copy: its files of up to ${mb(limits.maxFileBytes)} each add up to ${mb(bytes)}, over the ${mb(limits.maxKeptBytes)} limit.`);
 
   let files = kept.length;
-  const temp = path.join(dir, `${TEMP_PREFIX}${proposalId}-${randomUUID()}`);
-  await fs.mkdir(temp, { mode: 0o700 });
+  const tempName = `${TEMP_PREFIX}${proposalId}-${randomUUID()}`;
+  const createdAt = now().toISOString();
+  // Recorded before anything is made in snapshots/: the sweep can't list that folder, so this record
+  // is how it finds a temporary folder an export left behind.
+  await writeRecord(recordsDir, { proposalId, projectId, commit, createdAt, state: "exporting", temp: tempName });
+  const temp = path.join(dir, tempName);
   try {
+    await fs.mkdir(temp, { mode: 0o700 });
     const made = new Set<string>();
     await catBlobs(top, kept.map((file) => file.object), async (index, content) => {
       const { segments, size } = kept[index];
@@ -278,12 +359,11 @@ export async function ensureSnapshot({ evaluatorDir, proposalId, projectId, proj
     await fs.rename(temp, target);
   } catch (error) {
     await removeEntry(temp).catch(() => {});
+    await removeRecord(recordsDir, proposalId).catch(() => {});
     throw error instanceof SnapshotError ? error : new SnapshotError(`Couldn't copy the project: ${(error as Error).message}`);
   }
-  const record: SnapshotRecord = { proposalId, projectId, commit, createdAt: now().toISOString(), files, bytes, skipped: skipped.slice(0, SNAPSHOT_SKIPPED_LISTED) };
-  const recordTemp = path.join(dir, `${TEMP_PREFIX}${proposalId}-${randomUUID()}.json`);
-  await fs.writeFile(recordTemp, JSON.stringify(record, null, 2) + "\n", { mode: 0o600 });
-  await fs.rename(recordTemp, recordFile);
+  const record: SnapshotRecord = { proposalId, projectId, commit, createdAt, state: "complete", files, bytes, skipped: skipped.slice(0, SNAPSHOT_SKIPPED_LISTED) };
+  await writeRecord(recordsDir, record);
   return record;
 }
 
@@ -292,38 +372,46 @@ const DONE = new Set(["rejected", "expired", "invalid", "failed"]);
 
 /**
  * Removes copies older than SNAPSHOT_MAX_AGE_MS or whose proposal is gone or finished without a
- * thread, and temporary export folders older than SNAPSHOT_TEMP_MAX_AGE_MS. Only entries directly
- * in snapshots/ named like ones ensureSnapshot makes are touched, and nothing if snapshots/ is a
- * symlink. Returns the names removed.
+ * thread, and exports still "exporting" after SNAPSHOT_TEMP_MAX_AGE_MS. snapshots/ is never listed:
+ * the proposals to look at come from the records folder and the stored proposals, and every entry
+ * is opened by a name ensureSnapshot makes. Nothing is touched if snapshots/ is a symlink, and its
+ * mode is asserted again. Returns the names removed.
  */
-export async function sweepSnapshots({ evaluatorDir, proposals, now = () => new Date() }: {
-  evaluatorDir: string; proposals: { id: string; status: string }[]; now?: () => Date;
+export async function sweepSnapshots({ evaluatorDir, recordsDir, proposals, now = () => new Date() }: {
+  evaluatorDir: string; recordsDir: string; proposals: { id: string; status: string }[]; now?: () => Date;
 }): Promise<string[]> {
   const dir = await ownSnapshotsDir(evaluatorDir, false);
   if (!dir) return [];
   const statuses = new Map(proposals.map((proposal) => [proposal.id, proposal.status]));
   const time = now().getTime();
   const removed: string[] = [];
-  const remove = async (name: string) => { await removeEntry(path.join(dir, name)); removed.push(name); };
-  const names = await fs.readdir(dir);
+  const remove = async (name: string) => {
+    const full = path.join(dir, name);
+    if (!(await fs.lstat(full).catch(() => null))) return;
+    await removeEntry(full);
+    removed.push(name);
+  };
+  // A records folder that is not a plain folder is left alone, and so is every record.
+  const records = await ownRecordsDir(recordsDir).then(() => true, () => false);
+  const recorded = records ? await fs.readdir(recordsDir) : [];
   const ids = new Set<string>();
-  for (const name of names) {
-    if (name.startsWith(TEMP_PREFIX)) {
-      const info = await fs.lstat(path.join(dir, name)).catch(() => null);
-      if (info && time - info.mtimeMs > SNAPSHOT_TEMP_MAX_AGE_MS) await remove(name);
-      continue;
-    }
-    const id = name.endsWith(".json") ? name.slice(0, -5) : name;
-    if (UUID.test(id)) ids.add(id);
-  }
+  for (const name of recorded) if (name.endsWith(".json") && UUID.test(name.slice(0, -5))) ids.add(name.slice(0, -5));
+  for (const proposal of proposals) if (UUID.test(proposal.id)) ids.add(proposal.id);
   for (const id of ids) {
-    const record = await readRecord(path.join(dir, `${id}.json`));
+    if (records) await moveLegacyRecord(dir, recordsDir, id);
+    const record = records ? await readRecord(snapshotRecordPath(recordsDir, id)) : null;
     const folder = await fs.lstat(path.join(dir, id)).catch(() => null);
+    if (!record && !folder) continue;
     const made = Date.parse(record?.createdAt ?? "") || folder?.mtimeMs || 0;
-    const status = statuses.get(id);
-    if (status !== undefined && !DONE.has(status) && time - made <= SNAPSHOT_MAX_AGE_MS) continue;
-    if (names.includes(id)) await remove(id);
-    if (names.includes(`${id}.json`)) await remove(`${id}.json`);
+    if (record?.state === "exporting") {
+      if (time - made <= SNAPSHOT_TEMP_MAX_AGE_MS) continue;
+    } else {
+      const status = statuses.get(id);
+      if (status !== undefined && !DONE.has(status) && time - made <= SNAPSHOT_MAX_AGE_MS) continue;
+    }
+    if (folder) await remove(id);
+    if (isTempName(record?.temp, id)) await remove(record.temp);
+    if (records && await removeRecord(recordsDir, id)) removed.push(`${id}.json`);
   }
   return removed;
 }

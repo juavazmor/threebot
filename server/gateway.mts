@@ -1126,6 +1126,7 @@ async function resolveMcpAuth(raw: string): Promise<McpAuth | null> {
 // handoff-allowlist.json, written by hand; the evaluator folder and its settings are made by hand too.
 const handoffLauncher = createHandoffLauncher({
   evaluatorDir: path.resolve(process.env.HANDOFF_EVALUATOR_DIR ?? path.join(dataRoot, "evaluator")),
+  recordsDir: path.join(appDir, "handoff-snapshots"),
   rpc: roomRpc,
   projects: t3Projects,
   eligible: handoffTargets,

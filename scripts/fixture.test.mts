@@ -1341,7 +1341,10 @@ test('a handoff proposal is shown as stored, proposed only by an allowed Bot, an
     assert.equal((await stat(snapshotPath)).mode & 0o777, 0o555);
     assert.equal((await stat(path.join(snapshotPath, 'README.md'))).mode & 0o777, 0o444);
     assert.equal(await readFile(path.join(snapshotPath, 'README.md'), 'utf8'), HANDOFF_FIXTURE.files['README.md']);
-    assert.equal(JSON.parse(await readFile(`${snapshotPath}.json`, 'utf8')).commit, commit);
+    // Its record is kept by the gateway, outside the evaluator folder, and snapshots/ can't be listed.
+    assert.equal(JSON.parse(await readFile(path.join(fixture.root, 'bots/.botapp/handoff-snapshots', `${proposalId}.json`), 'utf8')).commit, commit);
+    assert.equal(existsSync(`${snapshotPath}.json`), false);
+    assert.equal((await stat(path.dirname(snapshotPath))).mode & 0o777, 0o311);
     assert.equal(launch.title, 'Evaluate fit: example.com');
     assert.equal(launch.runtimeMode, 'approval-required');
     assert.equal(launch.interactionMode, 'plan');

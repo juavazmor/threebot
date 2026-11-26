@@ -109,9 +109,11 @@ export function threadNotFound(error: unknown): boolean {
 /** `sent`: T3 itself answered the launch with a failure; false when the launch was never sent. */
 const refused = (error: unknown, sent: boolean) => Object.assign(error instanceof Error ? error : new Error(String(error)), { refused: true, sent });
 
-export function createHandoffLauncher({ evaluatorDir, rpc, projects, eligible, models }: {
+export function createHandoffLauncher({ evaluatorDir, recordsDir, rpc, projects, eligible, models }: {
   /** Absolute; HANDOFF_EVALUATOR_DIR. */
   evaluatorDir: string;
+  /** Where the snapshots' records are kept, outside the evaluator folder: <appDir>/handoff-snapshots. */
+  recordsDir: string;
   rpc: HandoffRpc;
   /** T3's projects that are not deleted (archived ones included). */
   projects: () => Promise<HandoffT3Project[]>;
@@ -185,12 +187,12 @@ export function createHandoffLauncher({ evaluatorDir, rpc, projects, eligible, m
     snapshotPath: (proposalId: string) => snapshotPath(evaluatorDir, proposalId),
     async prepareSnapshot(proposal: HandoffProposal) {
       try {
-        await ensureSnapshot({ evaluatorDir, proposalId: proposal.id, projectId: proposal.projectId, projectPath: proposal.projectPath, commit: proposal.commit });
+        await ensureSnapshot({ evaluatorDir, recordsDir, proposalId: proposal.id, projectId: proposal.projectId, projectPath: proposal.projectPath, commit: proposal.commit });
       } catch (error) {
         throw Object.assign(error instanceof Error ? error : new Error(String(error)), { invalid: error instanceof SnapshotError && error.invalid });
       }
     },
-    sweepSnapshots: (proposals: HandoffProposal[]) => sweepSnapshots({ evaluatorDir, proposals }),
+    sweepSnapshots: (proposals: HandoffProposal[]) => sweepSnapshots({ evaluatorDir, recordsDir, proposals }),
 
     async threadExists(threadId: string) {
       try {

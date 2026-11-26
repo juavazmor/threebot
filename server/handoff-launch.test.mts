@@ -83,7 +83,7 @@ async function setup(t: TestContext, { settings = true }: { settings?: boolean }
     .filter((project) => !project.archivedAt && project.id !== "project-bot")
     .map((project) => ({ projectId: project.id, title: project.title ?? project.id, path: project.workspaceRoot! }));
   const launcher = createHandoffLauncher({
-    evaluatorDir, rpc, projects: async () => { if (t3.projectsDown) throw new Error("T3 timed out"); return projects.filter((project) => !project.deletedAt); }, eligible,
+    evaluatorDir, recordsDir: path.join(dir, "handoff-snapshots"), rpc, projects: async () => { if (t3.projectsDown) throw new Error("T3 timed out"); return projects.filter((project) => !project.deletedAt); }, eligible,
     models: async () => ({ providers: [{ instanceId: "claudeAgent", driver: "claudeAgent" }, { instanceId: "codex", driver: "codex" }], appDefault: CLAUDE, fallback: CLAUDE }),
   });
   const allowlistFile = path.join(dir, "handoff-allowlist.json");
