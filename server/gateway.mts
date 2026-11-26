@@ -1307,7 +1307,10 @@ async function serveStatic(req: IncomingMessage, res: ServerResponse, urlPath: s
   // The bundle is text, and nothing between Tailscale and the browser compresses it.
   const compressible = isCompressible(ext, stat.size);
   const encoding = pickEncoding(req.headers["accept-encoding"], compressible);
-  const headers = { "content-type": MIME[ext] ?? "application/octet-stream", "cache-control": cache, vary: "Accept-Encoding" };
+  const headers: Record<string, string> = { "content-type": MIME[ext] ?? "application/octet-stream", "cache-control": cache, vary: "Accept-Encoding" };
+  // The app frames pages Bots wrote. A frame may only show this app's own files, so such a page cannot
+  // carry what the user typed into it to another site by navigating itself there.
+  if (file === path.join(cfg.staticDir, "index.html")) headers["content-security-policy"] = "frame-src 'self' blob:";
   if (encoding === "unacceptable") {
     res.writeHead(406, { vary: "Accept-Encoding", "cache-control": "no-store" });
     return res.end();

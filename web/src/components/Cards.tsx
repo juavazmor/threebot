@@ -14,6 +14,7 @@ import type { Bot } from "../lib/types";
 import { approvalDecision, approvalOptions, questionAnswers, requestQuestions, requestStatus, secretLink, secretStatus, type ApprovalDecision, type QuestionAnswers } from "../lib/runtimeRequests";
 import { finishQuestionDraft, questionDraft } from "../lib/questionDrafts";
 import { handoffApi, handoffRunsAs, handoffStatusLabel, type HandoffProposal } from "../lib/handoffs";
+import { withBotPageCsp } from "../lib/botPageCsp";
 import "./RequestCards.css";
 import "./AutomatedCard.css";
 import "./PageCard.css";
@@ -520,7 +521,7 @@ function themedPage(html: string, dark: boolean) {
         ? html.replace(/<html[^>]*>/i, (m) => `${m}<head>${style}</head>`)
         : style + html;
   out = out.includes("</body>") ? out.replace("</body>", RESIZE_SCRIPT + "</body>") : out + RESIZE_SCRIPT;
-  return out;
+  return withBotPageCsp(out);
 }
 
 type PageEntry = Extract<Entry, { kind: "page" }>;
@@ -610,7 +611,7 @@ function PagePreview({ entry }: { entry: PageEntry }) {
           <a href={load.url} target="_blank" rel="noreferrer" className="page-viewer-action" aria-label="Open in new tab"><ExternalLink size={20} /></a>
         </div>
         <div className="page-viewer-content">
-          <iframe srcDoc={doc} title={title} sandbox="allow-scripts allow-popups" />
+          <iframe srcDoc={doc} title={title} sandbox="allow-scripts" />
         </div>
       </dialog>}
     </div>

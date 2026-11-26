@@ -55,7 +55,9 @@ test('open presents the actual interactive sandboxed Page; Close and Escape rest
   const open = openButton(); assert.ok(open); open.focus(); await click(open);
   const dialog = document.querySelector('dialog'); assert.ok(dialog); assert.equal(dialog.open, true);
   assert.equal(dialog.getAttribute('aria-label'), 'Sample counter card');
-  const frame = dialog.querySelector('iframe'); assert.equal(frame.getAttribute('sandbox'), 'allow-scripts allow-popups');
+  const frame = dialog.querySelector('iframe'); assert.equal(frame.getAttribute('sandbox'), 'allow-scripts');
+  // Both frames get the page closed off from the network, before anything of its own.
+  for (const shown of [frame, host.querySelector('iframe')]) assert.match(shown.srcdoc, /^(<!doctype html>)?<meta http-equiv="Content-Security-Policy" content="default-src 'none';/);
   assert.match(frame.srcdoc, /onclick="this.textContent=Number\(this.textContent\)\+1"/);
   assert.equal(frame.closest('[inert]'), null); assert.equal(frame.getAttribute('aria-hidden'), null);
   const close = dialog.querySelector('button[aria-label="Close page"]'); assert.equal(document.activeElement, close);
@@ -92,7 +94,7 @@ test('Page theme follows the app for fragments and full documents without broade
   await render({ ...entry, title: '  ' });
   const preview = host.querySelector('iframe');
   assert.ok(host.querySelector('button[aria-label="Open page, Untitled page"]'));
-  assert.match(preview.srcdoc, /^<!doctype html><html><head><style id="t3-theme">/);
+  assert.match(preview.srcdoc, /^<!doctype html><meta http-equiv="Content-Security-Policy" content="[^"]+"><html><head><style id="t3-theme">/);
   assert.match(preview.srcdoc, /color-scheme:light/);
   await settle(() => document.documentElement.classList.add('dark'));
   await window.happyDOM.waitUntilComplete(); await settle(() => {});

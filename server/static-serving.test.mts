@@ -154,4 +154,13 @@ describe("static responses are compressed for clients that ask", () => {
     assert.match(brotliDecompressSync(first.body).toString("utf8"), /<title>app<\/title>/);
     assert.deepEqual(second.body, first.body);
   });
+
+  test("the app shell lets its frames show only the app's own files", async () => {
+    // A page a Bot wrote is framed by the app; it must not be able to navigate itself to another site.
+    for (const urlPath of ["/", "/index.html", "/some/app/route"]) {
+      assert.equal((await request(gateway.port, urlPath)).headers["content-security-policy"], "frame-src 'self' blob:", urlPath);
+      assert.equal((await request(gateway.port, urlPath, { "accept-encoding": "br" })).headers["content-security-policy"], "frame-src 'self' blob:", urlPath);
+    }
+    assert.equal((await request(gateway.port, "/assets/big.js")).headers["content-security-policy"], undefined);
+  });
 });
