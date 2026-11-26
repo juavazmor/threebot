@@ -6,6 +6,12 @@ import { test, type TestContext } from "node:test";
 import { createHandoffs, type HandoffTarget } from "./handoff.mts";
 import { EVALUATOR_PROJECT_TITLE, createHandoffLauncher, evaluatorProblem, t3Refused, type HandoffT3Project } from "./handoff-launch.mts";
 
+/** The evaluator settings handoffs require, and nothing more. */
+const HARDENED = {
+  sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false },
+  permissions: { deny: ["Edit", "Write", "mcp__bot__*", "mcp__t3-code__t3_thread_send"], disableBypassPermissionsMode: "disable" },
+};
+
 const CLAUDE = { instanceId: "claudeAgent", model: "claude-opus-5-5" };
 /** A failure as T3Client reports one T3 answered with. */
 const t3Failure = (message: string) => Object.assign(new Error(message), { cause: [{ _tag: "Fail", error: { message } }] });
@@ -20,7 +26,7 @@ async function setup(t: TestContext, { settings = true }: { settings?: boolean }
   t.after(() => rm(dir, { recursive: true, force: true }));
   const evaluatorDir = path.join(dir, "evaluator");
   await mkdir(path.join(evaluatorDir, ".claude"), { recursive: true });
-  if (settings) await writeFile(path.join(evaluatorDir, ".claude", "settings.json"), "{}\n");
+  if (settings) await writeFile(path.join(evaluatorDir, ".claude", "settings.json"), JSON.stringify(HARDENED));
   const projects: HandoffT3Project[] = [
     { id: "project-app", title: "App", workspaceRoot: path.join(dir, "app"), defaultModelSelection: { instanceId: "codex", model: "gpt-6-sol" } },
     { id: "project-bot", title: "Reader", workspaceRoot: path.join(dir, "bots", "reader") },
@@ -73,8 +79,46 @@ test("the evaluator folder counts only with its .claude/settings.json", async (t
   assert.match((await evaluatorProblem(dir))!, /settings\.json is missing/, "a folder named settings.json is not settings");
   await rm(path.join(dir, ".claude"), { recursive: true });
   await mkdir(path.join(dir, ".claude"));
-  await writeFile(path.join(dir, ".claude", "settings.json"), "{}");
+  await writeFile(path.join(dir, ".claude", "settings.json"), JSON.stringify(HARDENED));
   assert.equal(await evaluatorProblem(dir), null);
+});
+
+test("evaluator settings count only when they hold every hardening rule, and the refusal names what is missing", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "handoff-evaluator-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(path.join(dir, ".claude"));
+  const write = (value: unknown) => writeFile(path.join(dir, ".claude", "settings.json"), typeof value === "string" ? value : JSON.stringify(value));
+  const deny = HARDENED.permissions.deny;
+  const cases: [unknown, RegExp][] = [
+    ["{}", /sandbox\.enabled: true.*permissions\.disableBypassPermissionsMode/],
+    ["not json", /valid JSON/],
+    ["[]", /sandbox\.enabled: true/],
+    [{ ...HARDENED, sandbox: { ...HARDENED.sandbox, enabled: "true" } }, /needs sandbox\.enabled: true\.$/],
+    [{ ...HARDENED, sandbox: { ...HARDENED.sandbox, failIfUnavailable: undefined } }, /needs sandbox\.failIfUnavailable: true\.$/],
+    [{ ...HARDENED, sandbox: { enabled: true, failIfUnavailable: true } }, /needs sandbox\.allowUnsandboxedCommands: false\.$/],
+    [{ ...HARDENED, permissions: { ...HARDENED.permissions, deny: deny.filter((rule) => rule !== "mcp__bot__*") } }, /needs permissions\.deny "mcp__bot__\*"\.$/],
+    [{ ...HARDENED, permissions: { ...HARDENED.permissions, deny: deny.filter((rule) => rule !== "mcp__t3-code__t3_thread_send") } }, /needs permissions\.deny "mcp__t3-code__t3_thread_send"\.$/],
+    [{ ...HARDENED, permissions: { ...HARDENED.permissions, deny: "Edit Write mcp__bot__* mcp__t3-code__t3_thread_send" } }, /permissions\.deny "Edit"/],
+    [{ ...HARDENED, permissions: { deny } }, /needs permissions\.disableBypassPermissionsMode: "disable"\.$/],
+  ];
+  for (const [settings, message] of cases) {
+    await write(settings);
+    const problem = await evaluatorProblem(dir);
+    assert.match(problem ?? "", /^Handoffs are turned off: the evaluator's \.claude\/settings\.json is not hardened/, JSON.stringify(settings));
+    assert.match(problem!, message, JSON.stringify(settings));
+  }
+  // More rules than required are fine.
+  await write({ ...HARDENED, permissions: { ...HARDENED.permissions, deny: [...deny, "Bash(curl:*)"] } });
+  assert.equal(await evaluatorProblem(dir), null);
+});
+
+test("evaluator settings that are not hardened refuse both proposing and approving", async (t) => {
+  const ready = await setup(t);
+  const { proposal } = await ready.propose();
+  await writeFile(path.join(ready.evaluatorDir, ".claude", "settings.json"), "{}");
+  await assert.rejects(ready.propose("https://example.com/other"), { status: 503, message: /not hardened/ });
+  await assert.rejects(ready.handoffs.approve("reader", proposal.id), { status: 503, message: /not hardened/ });
+  assert.equal((await ready.handoffs.get("reader", proposal.id)).status, "pending");
 });
 
 test("a missing .claude/settings.json in the evaluator folder refuses both proposing and approving", async (t) => {

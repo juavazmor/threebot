@@ -2,7 +2,8 @@
 // runs in and its T3 project, the target checked again at approval, and the questions that settle
 // a launch T3 did not confirm. handoff.mts keeps the state machine and asks through here.
 //   - The evaluator folder is made and hardened by hand (its .claude/settings.json holds the OS
-//     sandbox and deny rules); without both, handoffs are refused rather than run unhardened.
+//     sandbox and deny rules); without both, and without each rule evaluatorSettingsGaps checks,
+//     handoffs are refused rather than run unhardened.
 //   - Its T3 project is found by folder, or made the way the provisioner makes a Bot's project,
 //     without creating the folder.
 import { randomUUID } from "node:crypto";
@@ -34,14 +35,40 @@ export function t3Refused(error: unknown): boolean {
   return reasons.length > 0 && reasons.every((reason) => (reason as { _tag?: unknown } | null)?._tag === "Fail");
 }
 
-/** Why handoffs can't run with this evaluator folder, or null when it and its settings exist. */
+/** Deny rules the evaluator's settings must hold: no file changes, no Bot tools, no messaging other threads. */
+export const EVALUATOR_DENY = ["Edit", "Write", "mcp__bot__*", "mcp__t3-code__t3_thread_send"] as const;
+
+/**
+ * What the evaluator's .claude/settings.json is missing to count as hardened, given its text: the
+ * OS sandbox on and required, no unsandboxed commands, the deny rules and no bypass mode. Empty when
+ * nothing is missing.
+ */
+export function evaluatorSettingsGaps(text: string): string[] {
+  let settings: unknown;
+  try { settings = JSON.parse(text); } catch { return ["valid JSON"]; }
+  const object = (value: unknown) => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const sandbox = object(object(settings).sandbox);
+  const permissions = object(object(settings).permissions);
+  const deny = Array.isArray(permissions.deny) ? permissions.deny : [];
+  return [
+    sandbox.enabled === true ? "" : "sandbox.enabled: true",
+    sandbox.failIfUnavailable === true ? "" : "sandbox.failIfUnavailable: true",
+    sandbox.allowUnsandboxedCommands === false ? "" : "sandbox.allowUnsandboxedCommands: false",
+    ...EVALUATOR_DENY.map((rule) => deny.includes(rule) ? "" : `permissions.deny "${rule}"`),
+    permissions.disableBypassPermissionsMode === "disable" ? "" : `permissions.disableBypassPermissionsMode: "disable"`,
+  ].filter(Boolean);
+}
+
+/** Why handoffs can't run with this evaluator folder, or null when it and its hardened settings exist. */
 export async function evaluatorProblem(dir: string): Promise<string | null> {
-  const is = async (file: string, kind: "dir" | "file") => {
-    try { const info = await fs.stat(file); return kind === "dir" ? info.isDirectory() : info.isFile(); } catch { return false; }
-  };
-  if (!(await is(dir, "dir")) || !(await is(path.join(dir, ".claude", "settings.json"), "file"))) {
-    return `Handoffs are turned off: the evaluator folder ${dir} or its .claude/settings.json is missing.`;
-  }
+  const settingsFile = path.join(dir, ".claude", "settings.json");
+  let isDir = false;
+  try { isDir = (await fs.stat(dir)).isDirectory(); } catch { /* missing */ }
+  let text: string | null = null;
+  try { if ((await fs.stat(settingsFile)).isFile()) text = await fs.readFile(settingsFile, "utf8"); } catch { /* missing or unreadable */ }
+  if (!isDir || text === null) return `Handoffs are turned off: the evaluator folder ${dir} or its .claude/settings.json is missing.`;
+  const gaps = evaluatorSettingsGaps(text);
+  if (gaps.length) return `Handoffs are turned off: the evaluator's .claude/settings.json is not hardened; it needs ${gaps.join(", ")}.`;
   return null;
 }
 

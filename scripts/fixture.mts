@@ -154,7 +154,10 @@ async function seed(root: string, scenario = 'basic') {
     const { proposalId, bot, botName, threadId, projectId, projectTitle, projectDir, url, kind, evaluatorDir } = HANDOFF_FIXTURE;
     await mkdir(path.join(root, projectDir), { recursive: true });
     await mkdir(path.join(root, evaluatorDir, '.claude'), { recursive: true });
-    await writeFile(path.join(root, evaluatorDir, '.claude', 'settings.json'), JSON.stringify({ permissions: { deny: ['Edit', 'Write'] } }, null, 2) + '\n');
+    await writeFile(path.join(root, evaluatorDir, '.claude', 'settings.json'), JSON.stringify({
+      sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false },
+      permissions: { deny: ['Edit', 'Write', 'mcp__bot__*', 'mcp__t3-code__t3_thread_send'], disableBypassPermissionsMode: 'disable' },
+    }, null, 2) + '\n');
     await writeFile(path.join(root, 'bots/.botapp/handoff-allowlist.json'), JSON.stringify({ [bot]: { projects: [projectId] } }, null, 2) + '\n');
     await writeFile(path.join(root, 'bots/.botapp/handoffs.json'), JSON.stringify({ version: 1, proposals: [{
       id: proposalId, botSlug: bot, botName, threadId, projectId, projectTitle, projectPath: path.join(root, projectDir), kind, url,
