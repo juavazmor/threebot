@@ -9,6 +9,11 @@ import { EVALUATOR_PROJECT_TITLE, createHandoffLauncher, evaluatorProblem, t3Ref
 const CLAUDE = { instanceId: "claudeAgent", model: "claude-opus-5-5" };
 /** A failure as T3Client reports one T3 answered with. */
 const t3Failure = (message: string) => Object.assign(new Error(message), { cause: [{ _tag: "Fail", error: { message } }] });
+// What T3 0.1.12 answers for a thread it does not have.
+const t3NoThread = (threadId: string) => Object.assign(new Error("Failed to load thread"), { cause: [{ _tag: "Fail", error: {
+  _tag: "OrchestrationV2GetThreadProjectionError", threadId, message: `Failed to load orchestration V2 thread ${threadId}`,
+  cause: { name: "OrchestratorProjectionError", cause: { name: "ProjectionStoreThreadNotFoundError", message: `No orchestration projection exists for thread ${threadId}.` } },
+} }] });
 
 async function setup(t: TestContext, { settings = true }: { settings?: boolean } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "handoff-launch-"));
@@ -37,7 +42,7 @@ async function setup(t: TestContext, { settings = true }: { settings?: boolean }
       if (tag === "orchestration.launchThread") { const answer = await t3.launch(payload); threads.add(payload.threadId); return answer; }
       if (tag === "orchestration.getThreadProjection") {
         if (t3.threadAnswer) return t3.threadAnswer(payload.threadId);
-        if (!threads.has(payload.threadId)) throw t3Failure("Thread not found");
+        if (!threads.has(payload.threadId)) throw t3NoThread(payload.threadId);
         return { thread: { id: payload.threadId } };
       }
       throw new Error(`unexpected ${tag}`);
@@ -177,6 +182,10 @@ test("T3's own failure answer is told apart from a call that may have gone throu
   t3.threadAnswer = async () => { throw new Error("socket closed"); };
   assert.equal((await handoffs.get("reader", dropped.id)).status, "launching");
   await assert.rejects(launcher.threadExists("anything"), /socket closed/);
+  // A failure that is not "no such thread" (T3 could not load it) says nothing either way.
+  t3.threadAnswer = async () => { throw t3Failure("database is locked"); };
+  await assert.rejects(launcher.threadExists("anything"), /database is locked/);
+  assert.equal((await handoffs.get("reader", dropped.id)).status, "launching");
   t3.threadAnswer = null;
   assert.equal(await launcher.threadExists("anything"), false);
 });

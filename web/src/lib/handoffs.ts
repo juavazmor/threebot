@@ -48,7 +48,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** The proposal a completed handoff_propose call made, from the tool's result; null for an error. */
 export function handoffProposalId(output: unknown): string | null {
-  const result = resultObject(output);
+  let result = resultObject(output);
+  // A harness may keep the tool's text as one string instead of structured content or text blocks.
+  if (result && result.proposed === undefined && typeof result.content === "string") result = resultObject(result.content);
   if (result?.proposed !== true || typeof result.proposalId !== "string" || !UUID.test(result.proposalId)) return null;
   return result.proposalId;
 }

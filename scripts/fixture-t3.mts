@@ -410,7 +410,10 @@ export async function startFakeT3(root: string, port = 0, { scenario = 'basic', 
         }
         if (tag === 'scheduledTasks.subscribe') { subs.set(id, { tag }); return chunk(ws, id, { tasks: landing?.tasks ?? latest?.tasks ?? [] }); }
         if (tag === 'orchestration.getThreadProjection') {
-          if (!items.has(payload.threadId)) return fail(ws, id, 'Unknown fixture thread');
+          // The shape real T3 answers with for a thread it does not have.
+          if (!items.has(payload.threadId)) return ws.send(JSON.stringify({ _tag: 'Exit', requestId: id, exit: { _tag: 'Failure', cause: [{ _tag: 'Fail', error: {
+            _tag: 'OrchestrationV2GetThreadProjectionError', threadId: payload.threadId, message: 'Unknown fixture thread',
+            cause: { name: 'OrchestratorProjectionError', cause: { name: 'ProjectionStoreThreadNotFoundError', message: 'Unknown fixture thread' } } } }] } }));
           return exit(ws, id, projection(payload.threadId));
         }
         if (tag === 'orchestration.subscribeThread') {

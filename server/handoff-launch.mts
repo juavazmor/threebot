@@ -45,6 +45,16 @@ export async function evaluatorProblem(dir: string): Promise<string | null> {
   return null;
 }
 
+/**
+ * T3's answer for a thread it does not have (checked on 0.1.12): a failure whose chain of causes
+ * ends in ProjectionStoreThreadNotFoundError.
+ */
+export function threadNotFound(error: unknown): boolean {
+  let text: string;
+  try { text = JSON.stringify((error as { cause?: unknown } | null)?.cause ?? null); } catch { return false; }
+  return /ThreadNotFound/.test(text);
+}
+
 const refused = (error: unknown) => Object.assign(error instanceof Error ? error : new Error(String(error)), { refused: true });
 
 export function createHandoffLauncher({ evaluatorDir, rpc, projects, eligible, models }: {
@@ -123,7 +133,8 @@ export function createHandoffLauncher({ evaluatorDir, rpc, projects, eligible, m
       try {
         return Boolean(await timed(rpc.call("orchestration.getThreadProjection", { threadId }), QUERY_MS, "T3 timed out"));
       } catch (error) {
-        if (t3Refused(error)) return false;
+        // Only T3 saying it has no such thread counts as "no"; any other failure leaves it unknown.
+        if (t3Refused(error) && threadNotFound(error)) return false;
         throw error;
       }
     },

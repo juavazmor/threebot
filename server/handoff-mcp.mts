@@ -9,7 +9,8 @@ export const HANDOFF_TOOL = "handoff_propose";
 const FIELDS = ["projectId", "url", "kind", "threadId"] as const;
 
 const toolError = (text: string): ToolResult => ({ content: [{ type: "text", text }], isError: true });
-const toolJson = (value: unknown): ToolResult => ({ content: [{ type: "text", text: JSON.stringify(value) }] });
+// The result also goes as structured content: T3 keeps that as an object, whatever it does with the text.
+const toolJson = (value: Record<string, unknown>): ToolResult => ({ content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value });
 
 export function handoffToolDefinition(targets: HandoffTarget[]) {
   return {

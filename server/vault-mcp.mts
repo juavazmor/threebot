@@ -13,7 +13,7 @@ import { CONTACT_FIELDS, repeatedValues, matchesSite, siteDomain, type Vault } f
 type ToolArgs = Record<string, any>;
 /** A JSON-RPC message from the wire, before validation. */
 type RpcMessage = any;
-export interface ToolResult { content: { type: "text"; text: string }[]; isError?: boolean }
+export interface ToolResult { content: { type: "text"; text: string }[]; isError?: boolean; structuredContent?: Record<string, unknown> }
 export interface RpcResponse { jsonrpc: "2.0"; id: unknown; result?: unknown; error?: { code: number; message: string } }
 /** A server-browser tab of a Bot. */
 export interface BrowserTab { tabId: string; url: string; title?: string }

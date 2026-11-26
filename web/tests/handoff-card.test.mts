@@ -110,6 +110,10 @@ test("the same proposal made again moves its card instead of adding one", () => 
 test("a proposal id is read only from a proposal the gateway made", () => {
   assert.equal(handoffProposalId(JSON.stringify({ proposed: true, proposalId: ID })), ID);
   assert.equal(handoffProposalId({ content: [{ type: "text", text: JSON.stringify({ proposed: true, proposalId: ID }) }] }), ID);
+  // The shapes T3 keeps a tool result in: structured content, and the text kept as one string.
+  assert.equal(handoffProposalId({ content: JSON.stringify({ proposed: true, proposalId: ID }), _meta: {}, structuredContent: { proposed: true, proposalId: ID } }), ID);
+  assert.equal(handoffProposalId({ content: JSON.stringify({ proposed: true, proposalId: ID }) }), ID);
+  assert.equal(handoffProposalId({ content: JSON.stringify({ proposed: true, proposalId: ID }), isError: true }), null);
   assert.equal(handoffProposalId(JSON.stringify({ proposalId: ID })), null);
   assert.equal(handoffProposalId(JSON.stringify({ proposed: true, proposalId: "../../vault" })), null);
   assert.equal(handoffProposalId(JSON.stringify({ proposed: true, proposalId: `${ID}x` })), null);
